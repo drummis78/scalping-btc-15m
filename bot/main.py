@@ -250,6 +250,9 @@ async def _reconcile_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _symbols
+    db_url = settings.DATABASE_URL
+    masked = db_url[:30] + "..." if len(db_url) > 30 else repr(db_url)
+    logger.info(f"[STARTUP] DATABASE_URL = {masked}")
     await init_db()
     await ensure_daily_stats()
 
