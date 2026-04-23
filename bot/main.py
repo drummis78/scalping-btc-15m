@@ -147,14 +147,20 @@ async def _process_signal(sig: dict):
                      json.dumps(result))
 
     if result["status"] == "success":
-        sl_str = f"${sl_price:,.4f}"
-        tp_str = f"${tp_price:,.4f}"
+        lev = result.get("leverage", settings.MAX_LEVERAGE)
+        liq = price * (1 - 1/lev) if side == "long" else price * (1 + 1/lev)
+        sl_str  = f"`${sl_price:,.4f}`"  if sl_price  else "`—`"
+        tp_str  = f"`${tp_price:,.4f}`"  if tp_price  else "`—`"
         fund_str = f"Score IA: `{_fund_impact:.1f}`" if _fund_reason else "IA: desactivado"
+        mode_str = "PAPER" if settings.TESTNET else "REAL"
         await notifier.notify(
-            f"🎯 *SCALP {side.upper()}* `{symbol}`\n"
-            f"Precio: `${price:,.4f}` | SL: `{sl_str}` | TP: `{tp_str}`\n"
-            f"Qty: `{result.get('qty', '?'):.4f}` | {fund_str}\n"
-            f"`{'PAPER' if settings.TESTNET else 'REAL'}` — `{ts[:19]}`"
+            f"🎯 *[Scalping 15m] {side.upper()}* `{symbol}`\n"
+            f"📍 Entrada: `${price:,.4f}`\n"
+            f"🛑 Stop Loss: {sl_str}\n"
+            f"✅ Take Profit: {tp_str}\n"
+            f"💥 Liquidación aprox: `${liq:,.4f}`\n"
+            f"⚡ Apalancamiento: `{lev:.0f}x` | Qty: `{result.get('qty', 0):.4f}`\n"
+            f"{fund_str} | `{mode_str}` — `{ts[:19]}`"
         )
         if result.get("sl_warning"):
             await notifier.notify(f"🚨 {result['sl_warning']}")
@@ -201,11 +207,12 @@ async def _position_monitor():
                     if result["status"] == "success":
                         pnl  = result.get("pnl", 0)
                         icon = "✅" if tp_hit else "🛑"
+                        label = "TP ALCANZADO" if tp_hit else "SL TOCADO"
                         await notifier.notify(
-                            f"{icon} *{reason.upper().replace('_',' ')} — SCALP*\n"
+                            f"{icon} *[Scalping 15m] {label}*\n"
                             f"`{side.upper()}` `{symbol}`\n"
-                            f"Entry: `${pos['entry_price']:,.4f}` | Exit: `${close_price:,.4f}`\n"
-                            f"PnL: `{'+'if pnl>=0 else ''}${pnl:.2f}`"
+                            f"📍 Entry: `${pos['entry_price']:,.4f}` → Exit: `${close_price:,.4f}`\n"
+                            f"💰 PnL: `{'+'if pnl>=0 else ''}${pnl:.2f}`"
                         )
 
         except Exception as e:
