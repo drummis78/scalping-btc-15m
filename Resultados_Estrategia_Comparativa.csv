@@ -1,0 +1,13 @@
+symbol,Python Return %,Python WinRate %,Python Trades,TV WinRate %,TV Profit Factor,TV Drawdown %,Observaciones
+KAS/USDT,80.17,61.26,111,37.94,0.78,17.97,Alta discrepancia - Overfitting en Python
+AVAX/USDT,65.23,50.89,112,40.67,0.87,10.09,Mejor control de riesgo en TV
+SOL/USDT,16.28,54.40,68,37.57,0.72,12.64,Mucha volatilidad sin filtro de noticias
+FET/USDT,58.90,44.50,200,39.01,0.83,17.74,Potencial para filtrar con IA
+ETH/USDT,12.82,53.80,39,36.4,0.80,8.5,Baja rentabilidad técnica pura
+,,,
+HOJA COMPARATIVA (Resumen),,,
+Métrica,Teórico (Python),Real (TradingView),Diferencia,Causa Probable
+Win Rate Promedio,53.00%,38.50%,-14.50%,Look-ahead bias y mayor histórico en TV
+Profit Factor Medio,1.40,0.80,-0.60,Falsos breakouts por noticias/ballenas
+Drawdown Medio,15.00%,13.50%,-1.50,Ajuste de ATR dinámico funciona bien
+Total Trades (Muestra),~150,~1200,+1050,TradingView usa todo el historial de velas

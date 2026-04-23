@@ -6,7 +6,6 @@ Impacto evaluado en ventana de 4h — relevante para scalping.
 import asyncio
 import logging
 import json
-import aiosqlite
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -14,6 +13,7 @@ import aiohttp
 from openai import AsyncOpenAI
 
 from bot.config import settings
+from bot.state import get_pool
 
 logger = logging.getLogger("scalping_bot.fundamental")
 
@@ -59,22 +59,8 @@ class FundamentalFilter:
             self._poll_task.cancel()
 
     async def _ensure_table(self):
-        async with aiosqlite.connect(settings.DATABASE_PATH) as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS fundamental_events (
-                    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ts        TEXT NOT NULL,
-                    category  TEXT NOT NULL,
-                    source    TEXT NOT NULL,
-                    title     TEXT,
-                    sentiment REAL DEFAULT 0,
-                    magnitude REAL DEFAULT 0,
-                    impact    REAL DEFAULT 0,
-                    raw_data  TEXT
-                )
-            """)
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_fund_ts ON fundamental_events(ts)")
-            await db.commit()
+        # tabla creada en init_db() — no-op aquí
+        pass
 
     async def _poll_loop(self):
         while True:
@@ -101,13 +87,12 @@ class FundamentalFilter:
         value = float(entry["value"])
         self._last_fear_greed = {"value": value, "label": entry["value_classification"]}
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:00:00")
-        async with aiosqlite.connect(settings.DATABASE_PATH) as db:
-            await db.execute(
-                "INSERT OR IGNORE INTO fundamental_events (ts,category,source,title,sentiment,magnitude,impact,raw_data) VALUES (?,?,?,?,?,?,?,?)",
-                (ts, "sentiment", "fear_greed", entry["value_classification"],
+        async with get_pool().acquire() as conn:
+            await conn.execute("""
+                INSERT INTO fundamental_events (ts,category,source,title,sentiment,magnitude,impact,raw_data)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING
+            """, ts, "sentiment", "fear_greed", entry["value_classification"],
                  (value - 50) / 50, value, 0.0, json.dumps(entry))
-            )
-            await db.commit()
 
     async def _poll_newsapi(self, session: aiohttp.ClientSession):
         if not settings.NEWSAPI_KEY:
@@ -147,12 +132,11 @@ class FundamentalFilter:
                            json.dumps({"url": item.get("url", "")})))
 
         if events:
-            async with aiosqlite.connect(settings.DATABASE_PATH) as db:
-                await db.executemany(
-                    "INSERT OR IGNORE INTO fundamental_events (ts,category,source,title,sentiment,magnitude,impact,raw_data) VALUES (?,?,?,?,?,?,?,?)",
-                    events
-                )
-                await db.commit()
+            async with get_pool().acquire() as conn:
+                await conn.executemany("""
+                    INSERT INTO fundamental_events (ts,category,source,title,sentiment,magnitude,impact,raw_data)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING
+                """, events)
 
     async def _score_with_llm(self, title: str) -> dict:
         if not settings.GROQ_API_KEY:
@@ -179,12 +163,11 @@ class FundamentalFilter:
                     "reason": "fundamental_disabled", "impact_score": 0.0}
 
         cutoff = (datetime.utcnow() - timedelta(hours=IMPACT_WINDOW_HOURS)).isoformat()
-        async with aiosqlite.connect(settings.DATABASE_PATH) as db:
-            async with db.execute(
-                "SELECT MAX(impact), AVG(sentiment), COUNT(*) FROM fundamental_events WHERE ts >= ? AND category != 'sentiment'",
-                (cutoff,)
-            ) as row:
-                result = await row.fetchone()
+        async with get_pool().acquire() as conn:
+            result = await conn.fetchrow(
+                "SELECT MAX(impact), AVG(sentiment), COUNT(*) FROM fundamental_events WHERE ts >= $1 AND category != 'sentiment'",
+                cutoff
+            )
 
         max_impact  = result[0] or 0.0
         avg_sent    = result[1] or 0.0

@@ -1,0 +1,35 @@
+// @version=5
+strategy("Scalping 15m - TA Baseline", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// --- Inputs ---
+fast_ema_val = input.int(20, "Fast EMA")
+slow_ema_val = input.int(200, "Slow EMA")
+rsi_window = input.int(14, "RSI Window")
+rsi_low = input.int(30, "RSI Buy Level")
+atr_window = input.int(14, "ATR Window")
+sl_mult = input.float(2.0, "SL ATR Multiplier")
+tp_mult = input.float(4.0, "TP ATR Multiplier")
+
+// --- Indicators ---
+fast_ema = ta.ema(close, fast_ema_val)
+slow_ema = ta.ema(close, slow_ema_val)
+rsi = ta.rsi(close, rsi_window)
+atr = ta.atr(atr_window)
+
+// --- Logic ---
+trend_up = fast_ema > slow_ema
+pullback = rsi < rsi_low
+
+long_condition = trend_up and pullback
+
+// --- Execution ---
+if (long_condition)
+    sl_price = close - (atr * sl_mult)
+    tp_price = close + (atr * tp_mult)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit", "Long", stop=sl_price, limit=tp_price)
+
+// --- Visuals ---
+plot(fast_ema, color=color.blue, title="Fast EMA")
+plot(slow_ema, color=color.red, linewidth=2, title="Slow EMA")
+plotshape(long_condition, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)

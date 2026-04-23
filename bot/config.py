@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     NEWSAPI_KEY:               str  = ""
     GROQ_API_KEY:              str  = ""
 
-    DATABASE_PATH: str = "bot/trading.db"
+    DATABASE_URL:  str = ""           # Railway lo setea automático al conectar PostgreSQL
     LOG_FILE:      str = "bot/logs/trading.log"
     SCAN_INTERVAL: int = 900              # 15 minutos
     SYMBOLS_CSV:   str = "data/optimization_results.csv"
