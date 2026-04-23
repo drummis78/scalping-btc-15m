@@ -1,0 +1,15 @@
+.env
+bot/.env
+bot/trading.db
+bot/logs/
+*.db
+__pycache__/
+*.py[cod]
+*$py.class
+data/raw/*.csv
+data/processed/*.csv
+registro_simulacion.csv
+dashboard_scalping.html
+.vscode/
+.idea/
+.DS_Store
