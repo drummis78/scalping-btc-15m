@@ -13,7 +13,7 @@ from slowapi.errors import RateLimitExceeded
 
 from bot.config import settings
 from bot.state import (
-    init_db, get_all_positions, count_positions, get_total_pnl,
+    init_db, get_pool, get_all_positions, count_positions, get_total_pnl,
     get_paper_balance, get_today_stats, get_signal_log,
     is_replay, log_signal, get_current_dd_pct, get_peak_balance,
     ensure_daily_stats,
@@ -322,27 +322,20 @@ async def api_positions(request: Request):
 @app.get("/api/trades")
 @limiter.limit("30/minute")
 async def api_trades(request: Request, limit: int = Query(default=100)):
-    import aiosqlite
-    async with aiosqlite.connect(settings.DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM trades ORDER BY id DESC LIMIT ?", (limit,)) as cur:
-            rows = await cur.fetchall()
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM trades ORDER BY id DESC LIMIT $1", limit)
     return [dict(r) for r in rows]
 
 
 @app.get("/api/stats")
 @limiter.limit("30/minute")
 async def api_stats(request: Request):
-    import aiosqlite
-    async with aiosqlite.connect(settings.DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT COUNT(*) total, SUM(pnl) total_pnl, "
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT COUNT(*) total, COALESCE(SUM(pnl),0) total_pnl, "
             "SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) wins FROM trades"
-        ) as cur:
-            row = dict(await cur.fetchone())
-        async with db.execute("SELECT COUNT(*) open FROM positions") as cur:
-            open_row = dict(await cur.fetchone())
+        )
+        open_count = await conn.fetchval("SELECT COUNT(*) FROM positions")
     total = row["total"] or 0
     wins  = row["wins"]  or 0
     return {
@@ -351,7 +344,7 @@ async def api_stats(request: Request):
         "losses":         total - wins,
         "win_rate":       round(wins / total * 100, 2) if total else 0,
         "total_pnl":      round(row["total_pnl"] or 0.0, 2),
-        "open_positions": open_row["open"],
+        "open_positions": open_count,
         "balance":        round(await get_paper_balance(), 2),
         "strategy":       "SCALP",
     }
@@ -359,11 +352,8 @@ async def api_stats(request: Request):
 
 @app.get("/api/daily")
 async def api_daily():
-    import aiosqlite
-    async with aiosqlite.connect(settings.DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM daily_stats ORDER BY date DESC LIMIT 30") as cur:
-            rows = await cur.fetchall()
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM daily_stats ORDER BY date DESC LIMIT 30")
     today = await get_today_stats()
     return {"today": today, "history": [dict(r) for r in rows]}
 
