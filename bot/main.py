@@ -19,7 +19,7 @@ from bot.state import (
     get_paper_balance, get_today_stats, get_signal_log,
     is_replay, log_signal, get_current_dd_pct, get_peak_balance,
     ensure_daily_stats, is_blocked_logged, get_pending_blocked_signals,
-    update_blocked_outcome,
+    update_blocked_outcome, get_position,
 )
 from bot.exchange import binance_exchange
 from bot.scanner import load_symbols, scan_all
@@ -95,6 +95,11 @@ async def _process_signal(sig: dict):
     # Anti-replay por vela
     if await is_replay(symbol, side, candle_ts):
         logger.debug(f"[REPLAY] {symbol} {side} candle={candle_ts}")
+        return
+
+    # Posición ya abierta para este símbolo/lado
+    if await get_position("binance", symbol, side):
+        logger.debug(f"[SKIP] {symbol} {side} — posición ya abierta")
         return
 
     # Max posiciones
