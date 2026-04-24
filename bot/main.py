@@ -405,6 +405,59 @@ async def api_fundamental():
     }
 
 
+@app.get("/api/analytics")
+async def api_analytics():
+    async with get_pool().acquire() as conn:
+        sym_rows = await conn.fetch("""
+            SELECT symbol, side,
+                COUNT(*) AS total,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) AS losses,
+                ROUND(SUM(pnl)::numeric, 2) AS total_pnl,
+                ROUND(AVG(pnl)::numeric, 2) AS avg_pnl,
+                ROUND(AVG(CASE WHEN pnl > 0 THEN pnl END)::numeric, 2) AS avg_win,
+                ROUND(AVG(CASE WHEN pnl <= 0 THEN pnl END)::numeric, 2) AS avg_loss,
+                SUM(CASE WHEN close_reason='tp_hit' THEN 1 ELSE 0 END) AS tp_count,
+                SUM(CASE WHEN close_reason='sl_hit' THEN 1 ELSE 0 END) AS sl_count
+            FROM trades GROUP BY symbol, side ORDER BY total_pnl DESC
+        """)
+        daily_rows = await conn.fetch("""
+            SELECT date, realized_pnl, trade_count, win_count,
+                   ROUND((win_count::numeric / NULLIF(trade_count,0) * 100), 1) AS win_rate
+            FROM daily_stats ORDER BY date DESC LIMIT 30
+        """)
+        sig_rows = await conn.fetch("""
+            SELECT verdict, COUNT(*) AS cnt,
+                   ROUND(AVG(fund_impact)::numeric, 2) AS avg_impact
+            FROM signal_log GROUP BY verdict
+        """)
+        filter_dist = await conn.fetch("""
+            SELECT
+                CASE WHEN fund_impact >= 7 THEN 'alto (bloqueada)'
+                     WHEN fund_impact >= 4 THEN 'medio (reducida)'
+                     ELSE 'bajo (ok)'
+                END AS bucket,
+                COUNT(*) AS cnt
+            FROM signal_log WHERE verdict != 'executed'
+            GROUP BY bucket
+        """)
+        hour_rows = await conn.fetch("""
+            SELECT EXTRACT(HOUR FROM close_time::timestamptz) AS hour,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                   ROUND(AVG(pnl)::numeric, 2) AS avg_pnl
+            FROM trades WHERE close_time IS NOT NULL
+            GROUP BY hour ORDER BY hour
+        """)
+    return {
+        "by_symbol":   [dict(r) for r in sym_rows],
+        "by_day":      [dict(r) for r in daily_rows],
+        "by_verdict":  [dict(r) for r in sig_rows],
+        "filter_dist": [dict(r) for r in filter_dist],
+        "by_hour":     [dict(r) for r in hour_rows],
+    }
+
+
 @app.post("/admin/reset")
 async def api_reset(confirm: str = Query(default="")):
     """Cierra posiciones en el exchange y limpia todas las tablas. Requiere ?confirm=RESET"""
