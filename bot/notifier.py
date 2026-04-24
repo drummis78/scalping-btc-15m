@@ -1,6 +1,5 @@
 import logging
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram import Bot
 from bot.config import settings
 from bot.state import get_all_positions, get_total_pnl, get_today_stats
 
@@ -10,37 +9,21 @@ logger = logging.getLogger("scalping_bot.notifier")
 class TelegramNotifier:
     def __init__(self, exchange=None):
         self.exchange = exchange
-        self.app = ApplicationBuilder().token(settings.TELEGRAM_BOT_TOKEN).build() \
+        self._bot = Bot(token=settings.TELEGRAM_BOT_TOKEN) \
             if settings.TELEGRAM_BOT_TOKEN else None
 
-    def _setup_handlers(self):
-        if not self.app:
-            return
-        self.app.add_handler(CommandHandler("status", self.status_handler))
-        self.app.add_handler(CommandHandler("close_all", self.close_all_handler))
-        self.app.add_handler(CommandHandler("daily", self.daily_handler))
-
     async def start(self):
-        if not self.app:
-            return
-        self._setup_handlers()
-        await self.app.initialize()
-        await self.app.start()
-        await self.app.updater.start_polling()
-        logger.info("Telegram Bot started")
+        if self._bot:
+            logger.info("Telegram Bot started (send-only, no polling)")
 
     async def stop(self):
-        if not self.app:
-            return
-        await self.app.updater.stop()
-        await self.app.stop()
-        await self.app.shutdown()
+        pass
 
     async def notify(self, message: str):
-        if not self.app or not settings.TELEGRAM_CHAT_ID:
+        if not self._bot or not settings.TELEGRAM_CHAT_ID:
             return
         try:
-            await self.app.bot.send_message(
+            await self._bot.send_message(
                 chat_id=settings.TELEGRAM_CHAT_ID,
                 text=message,
                 parse_mode="Markdown"
