@@ -205,8 +205,10 @@ async def save_paper_balance(balance: float):
 
 # ── Daily stats ───────────────────────────────────────────────────────────────
 
+ARG_TZ = timezone(timedelta(hours=-3))
+
 def _today_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return datetime.now(ARG_TZ).strftime("%Y-%m-%d")
 
 
 async def ensure_daily_stats():
