@@ -380,7 +380,7 @@ async def api_fundamental():
     fg = fundamental_filter._last_fear_greed
     async with get_pool().acquire() as conn:
         events_24h = await conn.fetchval(
-            "SELECT COUNT(*) FROM fundamental_events WHERE ts >= NOW() - INTERVAL '24 hours' AND category = 'news'"
+            "SELECT COUNT(*) FROM fundamental_events WHERE ts::timestamptz >= NOW() - INTERVAL '24 hours' AND category = 'news'"
         )
         last_news = await conn.fetchrow(
             "SELECT title, impact, sentiment, ts FROM fundamental_events WHERE category = 'news' ORDER BY ts DESC LIMIT 1"
