@@ -374,6 +374,67 @@ async def api_audit(limit: int = Query(default=200)):
     return await get_signal_log(limit=limit)
 
 
+@app.get("/api/fundamental")
+async def api_fundamental():
+    from bot.fundamental import fundamental_filter
+    fg = fundamental_filter._last_fear_greed
+    async with get_pool().acquire() as conn:
+        events_24h = await conn.fetchval(
+            "SELECT COUNT(*) FROM fundamental_events WHERE ts >= NOW() - INTERVAL '24 hours' AND category = 'news'"
+        )
+        last_news = await conn.fetchrow(
+            "SELECT title, impact, sentiment, ts FROM fundamental_events WHERE category = 'news' ORDER BY ts DESC LIMIT 1"
+        )
+        last_fg = await conn.fetchrow(
+            "SELECT title, ts FROM fundamental_events WHERE category = 'sentiment' ORDER BY ts DESC LIMIT 1"
+        )
+    return {
+        "fear_greed": {
+            "value": fg["value"] if fg else None,
+            "label": fg["label"] if fg else None,
+            "last_update": dict(last_fg) if last_fg else None,
+        },
+        "news": {
+            "newsapi_configured": bool(settings.NEWSAPI_KEY),
+            "groq_configured":    bool(settings.GROQ_API_KEY),
+            "events_last_24h":    events_24h or 0,
+            "last_event":         dict(last_news) if last_news else None,
+        },
+        "poll_interval_s": settings.FUNDAMENTAL_POLL_INTERVAL,
+        "enabled":         settings.FUNDAMENTAL_ENABLED,
+    }
+
+
+@app.post("/admin/reset")
+async def api_reset(confirm: str = Query(default="")):
+    """Cierra posiciones en el exchange y limpia todas las tablas. Requiere ?confirm=RESET"""
+    if confirm != "RESET":
+        raise HTTPException(status_code=403, detail="Forbidden: pass ?confirm=RESET")
+
+    # Cerrar posiciones en el exchange
+    close_results = []
+    try:
+        close_results = await binance_exchange.emergency_close_all()
+    except Exception as e:
+        logger.warning(f"[RESET] Error cerrando posiciones: {e}")
+
+    # Limpiar todas las tablas operativas
+    async with get_pool().acquire() as conn:
+        await conn.execute("DELETE FROM positions")
+        await conn.execute("DELETE FROM trades")
+        await conn.execute("DELETE FROM processed_signals")
+        await conn.execute("DELETE FROM signal_log")
+        await conn.execute("DELETE FROM daily_stats")
+        await conn.execute("DELETE FROM account_state")
+
+    logger.warning("[RESET] Base de datos limpiada por solicitud manual")
+    return {
+        "ok": True,
+        "exchange_closes": close_results,
+        "message": "DB limpiada. Posiciones, trades y señales borrados.",
+    }
+
+
 @app.post("/admin/reset")
 async def admin_reset(x_secret: str = Header(default="", alias="X-Secret")):
     if settings.WEBHOOK_SECRET and x_secret != settings.WEBHOOK_SECRET:

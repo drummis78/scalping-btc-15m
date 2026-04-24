@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     MAX_DAILY_LOSS_PCT:   float = 3.0
     TARGET_DAILY_PCT:     float = 1.0
     PAPER_BALANCE:        float = 1000.0
-    MAX_POSITIONS:        int   = 5
+    MAX_POSITIONS:        int   = 20
     RISK_PER_TRADE:       float = 0.05    # 5% equity por trade
 
     FUNDAMENTAL_ENABLED:       bool = True
