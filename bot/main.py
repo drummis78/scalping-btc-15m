@@ -408,6 +408,7 @@ async def api_fundamental():
 @app.get("/api/analytics")
 async def api_analytics():
     async with get_pool().acquire() as conn:
+        # Performance por símbolo (trades ejecutados)
         sym_rows = await conn.fetch("""
             SELECT symbol, side,
                 COUNT(*) AS total,
@@ -421,6 +422,17 @@ async def api_analytics():
                 SUM(CASE WHEN close_reason='sl_hit' THEN 1 ELSE 0 END) AS sl_count
             FROM trades GROUP BY symbol, side ORDER BY total_pnl DESC
         """)
+        # Señales por símbolo cruzadas con resultado de trades
+        sig_sym_rows = await conn.fetch("""
+            SELECT s.symbol, s.side,
+                COUNT(*) AS señales,
+                SUM(CASE WHEN s.verdict = 'executed' THEN 1 ELSE 0 END) AS ejecutadas,
+                SUM(CASE WHEN s.verdict != 'executed' THEN 1 ELSE 0 END) AS filtradas,
+                SUM(CASE WHEN s.verdict = 'filtered_fundamental' THEN 1 ELSE 0 END) AS filtradas_ia,
+                ROUND(AVG(s.fund_impact)::numeric, 2) AS avg_impact
+            FROM signal_log s
+            GROUP BY s.symbol, s.side ORDER BY señales DESC
+        """)
         daily_rows = await conn.fetch("""
             SELECT date, realized_pnl, trade_count, win_count,
                    ROUND((win_count::numeric / NULLIF(trade_count,0) * 100), 1) AS win_rate
@@ -429,7 +441,7 @@ async def api_analytics():
         sig_rows = await conn.fetch("""
             SELECT verdict, COUNT(*) AS cnt,
                    ROUND(AVG(fund_impact)::numeric, 2) AS avg_impact
-            FROM signal_log GROUP BY verdict
+            FROM signal_log GROUP BY verdict ORDER BY cnt DESC
         """)
         filter_dist = await conn.fetch("""
             SELECT
@@ -450,11 +462,12 @@ async def api_analytics():
             GROUP BY hour ORDER BY hour
         """)
     return {
-        "by_symbol":   [dict(r) for r in sym_rows],
-        "by_day":      [dict(r) for r in daily_rows],
-        "by_verdict":  [dict(r) for r in sig_rows],
-        "filter_dist": [dict(r) for r in filter_dist],
-        "by_hour":     [dict(r) for r in hour_rows],
+        "by_symbol":      [dict(r) for r in sym_rows],
+        "signals_symbol": [dict(r) for r in sig_sym_rows],
+        "by_day":         [dict(r) for r in daily_rows],
+        "by_verdict":     [dict(r) for r in sig_rows],
+        "filter_dist":    [dict(r) for r in filter_dist],
+        "by_hour":        [dict(r) for r in hour_rows],
     }
 
 
