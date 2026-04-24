@@ -13,15 +13,24 @@ from bot.config import settings
 logger = logging.getLogger("scalping_bot.scanner")
 
 # Filtros: solo activos con backtest positivo y win rate decente
-MIN_RETURN_PCT = 0.0
-MIN_WIN_RATE   = 45.0
-TOP_N          = 20
+MIN_RETURN_PCT = 5.0
+MIN_WIN_RATE   = 50.0
+MIN_TRADES     = 50
+TOP_N          = 15
+
+# Símbolos que no existen en Binance Futures
+EXCLUDED = {"SHIB/USDT", "MATIC/USDT", "RNDR/USDT"}
 
 
 def load_symbols() -> list[dict]:
     try:
         df = pd.read_csv(settings.SYMBOLS_CSV)
-        df = df[(df["return_pct"] > MIN_RETURN_PCT) & (df["win_rate"] > MIN_WIN_RATE)]
+        df = df[
+            (df["return_pct"] > MIN_RETURN_PCT) &
+            (df["win_rate"] > MIN_WIN_RATE) &
+            (df["trades"] >= MIN_TRADES) &
+            (~df["symbol"].isin(EXCLUDED))
+        ]
         df = df.sort_values("return_pct", ascending=False).head(TOP_N)
         records = df.to_dict("records")
         logger.info(f"[SCANNER] {len(records)} símbolos cargados del CSV")

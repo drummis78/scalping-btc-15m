@@ -55,8 +55,15 @@ async def _signal_scanner():
             signals = await scan_all(_symbols)
             logger.info(f"[SCANNER] {len(signals)} señal(es) detectada(s)")
 
+            # Máximo 2 entradas nuevas por ciclo para evitar concentración de riesgo
+            new_entries = 0
             for sig in signals:
-                await _process_signal(sig)
+                if new_entries >= 2:
+                    logger.info(f"[SCANNER] Max entradas por ciclo alcanzado, saltando {sig['symbol']}")
+                    break
+                result = await _process_signal(sig)
+                if result == "executed":
+                    new_entries += 1
 
         except Exception as e:
             logger.error(f"[SCANNER-LOOP] {e}")
@@ -167,6 +174,7 @@ async def _process_signal(sig: dict):
         )
         if result.get("sl_warning"):
             await notifier.notify(f"🚨 {result['sl_warning']}")
+        return "executed"
 
     elif result["status"] not in ("skipped",):
         logger.error(f"[OPEN] {symbol} {side}: {result}")
