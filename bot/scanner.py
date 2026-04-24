@@ -68,7 +68,8 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
         df["lower"]   = df["low"].shift(1).rolling(window=lb).min()
         df["vol_avg"] = df["volume"].rolling(window=lb).mean()
 
-        last       = df.iloc[-1]
+        # usar la última vela CERRADA (iloc[-2]), no la vela en formación
+        last       = df.iloc[-2]
         candle_ts  = str(int(last["timestamp"]))
         last_close = float(last["close"])
         last_high  = float(last["high"])
