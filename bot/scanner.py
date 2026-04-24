@@ -30,7 +30,8 @@ TP_MULT       = 3.5     # TP = 3.5x ATR  → ratio 2.33:1
 MIN_BODY_PCT  = 0.30    # cuerpo vela ≥ 30% del rango total
 MIN_ATR_PCT   = 0.002   # ATR ≥ 0.2% del precio (filtra flatlines)
 MAX_CHASE_PCT = 0.008   # precio no puede estar >0.8% más allá del nivel DC
-ACTIVE_HOURS  = set(range(7, 23))  # solo operar 07:00–22:59 UTC
+# Filtro horario desactivado en paper trading — activar en live con set(range(7, 23))
+ACTIVE_HOURS: set = set()
 
 
 def load_symbols() -> list[dict]:
@@ -83,8 +84,8 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
     """
     symbol = config["symbol"]
 
-    # Filtro horario: evitar zonas de baja liquidez
-    if datetime.now(timezone.utc).hour not in ACTIVE_HOURS:
+    # Filtro horario: solo activo si ACTIVE_HOURS no está vacío
+    if ACTIVE_HOURS and datetime.now(timezone.utc).hour not in ACTIVE_HOURS:
         return None
 
     try:
