@@ -24,12 +24,10 @@ EXCLUDED       = {"SHIB/USDT", "MATIC/USDT", "RNDR/USDT"}
 
 # ── Parámetros fijos de estrategia ────────────────────────────────────────────
 LOOKBACK      = 20      # Donchian channel period (15m)
-VOL_MULT      = 2.0     # volumen mínimo = 2x promedio
+VOL_MULT      = 1.5     # volumen mínimo = 1.5x promedio
 SL_MULT       = 1.5     # SL = 1.5x ATR
 TP_MULT       = 3.5     # TP = 3.5x ATR  → ratio 2.33:1
-MIN_BODY_PCT  = 0.30    # cuerpo vela ≥ 30% del rango total
-MIN_ATR_PCT   = 0.002   # ATR ≥ 0.2% del precio (filtra flatlines)
-MAX_CHASE_PCT = 0.008   # precio no puede estar >0.8% más allá del nivel DC
+MIN_BODY_PCT  = 0.25    # cuerpo vela ≥ 25% del rango total
 # Filtro horario desactivado en paper trading — activar en live con set(range(7, 23))
 ACTIVE_HOURS: set = set()
 
@@ -122,24 +120,23 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
         if pd.isna(upper) or pd.isna(lower) or pd.isna(vol_avg) or vol_avg == 0:
             return None
 
-        # Filtro volatilidad: ATR debe ser significativo
-        if atr / last_close < MIN_ATR_PCT:
-            return None
-
-        # Filtro de cuerpo de vela: debe ser impulso real, no mecha
+        # Filtro de cuerpo de vela: elimina velas con mecha dominante
         candle_range = last_high - last_low
         candle_body  = abs(last_close - last_open)
-        body_ok = candle_range > 0 and (candle_body / candle_range) >= MIN_BODY_PCT
+        body_pct     = (candle_body / candle_range) if candle_range > 0 else 0
+        body_ok      = body_pct >= MIN_BODY_PCT
 
         # Filtro volumen
         vol_ok = last_vol > vol_avg * VOL_MULT
 
-        # ── LONG: cierre supera DC upper ─────────────────────────────────────
-        if last_high > upper and vol_ok and body_ok and last_close > last_open:
-            # No perseguir: precio no puede estar demasiado lejos del breakout
-            if last_close > upper * (1 + MAX_CHASE_PCT):
-                return None
+        logger.debug(
+            f"[SCAN] {symbol} vol_ok={vol_ok} body={body_pct*100:.0f}% "
+            f"high>upper={last_high>upper} low<lower={last_low<lower} "
+            f"green={last_close>last_open}"
+        )
 
+        # ── LONG: high supera DC upper, vela verde con cuerpo real ───────────
+        if last_high > upper and vol_ok and body_ok and last_close > last_open:
             sl_price = round(last_close - atr * SL_MULT, 6)
             tp_price = round(last_close + atr * TP_MULT, 6)
 
@@ -151,6 +148,7 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
                     "sl_price": sl_price, "tp_price": tp_price,
                     "candle_ts": candle_ts, "blocked_reason": "trend_1h_bearish",
                 }
+            logger.info(f"[SCANNER] ✅ {symbol} LONG entry={last_close} sl={sl_price} tp={tp_price}")
             return {
                 "symbol":    symbol,
                 "side":      "long",
@@ -160,12 +158,8 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
                 "candle_ts": candle_ts,
             }
 
-        # ── SHORT: cierre cae bajo DC lower ──────────────────────────────────
+        # ── SHORT: low cae bajo DC lower, vela roja con cuerpo real ──────────
         elif last_low < lower and vol_ok and body_ok and last_close < last_open:
-            # No perseguir
-            if last_close < lower * (1 - MAX_CHASE_PCT):
-                return None
-
             sl_price = round(last_close + atr * SL_MULT, 6)
             tp_price = round(last_close - atr * TP_MULT, 6)
 
@@ -177,6 +171,7 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
                     "sl_price": sl_price, "tp_price": tp_price,
                     "candle_ts": candle_ts, "blocked_reason": "trend_1h_bullish",
                 }
+            logger.info(f"[SCANNER] ✅ {symbol} SHORT entry={last_close} sl={sl_price} tp={tp_price}")
             return {
                 "symbol":    symbol,
                 "side":      "short",
