@@ -1,5 +1,6 @@
 import asyncpg
 import hashlib
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -294,3 +295,32 @@ async def get_signal_log(limit: int = 200) -> list:
             "SELECT * FROM signal_log ORDER BY id DESC LIMIT $1", limit
         )
     return [dict(r) for r in rows]
+
+
+async def is_blocked_logged(symbol: str, side: str, candle_ts: str) -> bool:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT 1 FROM signal_log
+            WHERE symbol=$1 AND side=$2 AND verdict='blocked_trend' AND fund_reason LIKE $3
+        """, symbol, side, f"%{candle_ts}%")
+    return row is not None
+
+
+async def get_pending_blocked_signals() -> list:
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT * FROM signal_log
+            WHERE verdict = 'blocked_trend' AND result_json LIKE '%pending%'
+            ORDER BY id ASC LIMIT 100
+        """)
+    return [dict(r) for r in rows]
+
+
+async def update_blocked_outcome(signal_id: int, outcome: str):
+    checked_at = datetime.now(timezone.utc).isoformat()
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "UPDATE signal_log SET result_json = $1 WHERE id = $2",
+            json.dumps({"outcome": outcome, "checked_at": checked_at}),
+            signal_id
+        )

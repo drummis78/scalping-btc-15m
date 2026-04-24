@@ -111,7 +111,13 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
             trend = await _get_1h_trend(exchange, symbol)
             if trend == "down":
                 logger.info(f"[SCANNER] {symbol} LONG bloqueado: tendencia 1H bajista (EMA20<EMA50)")
-                return None
+                return {
+                    "symbol": symbol, "side": "long", "price": last_close,
+                    "sl_price": round(last_close - atr * config["sl_mult"], 6),
+                    "tp_price": round(last_close + atr * config["tp_mult"], 6),
+                    "candle_ts": candle_ts, "config": config,
+                    "blocked_reason": "trend_1h_bearish",
+                }
             return {
                 "symbol":     symbol,
                 "side":       "long",
@@ -125,7 +131,13 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
             trend = await _get_1h_trend(exchange, symbol)
             if trend == "up":
                 logger.info(f"[SCANNER] {symbol} SHORT bloqueado: tendencia 1H alcista (EMA20>EMA50)")
-                return None
+                return {
+                    "symbol": symbol, "side": "short", "price": last_close,
+                    "sl_price": round(last_close + atr * config["sl_mult"], 6),
+                    "tp_price": round(last_close - atr * config["tp_mult"], 6),
+                    "candle_ts": candle_ts, "config": config,
+                    "blocked_reason": "trend_1h_bullish",
+                }
             return {
                 "symbol":     symbol,
                 "side":       "short",
@@ -142,15 +154,20 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
         return None
 
 
-async def scan_all(symbols: list[dict]) -> list[dict]:
-    """Escanea todos los símbolos y retorna lista de señales encontradas."""
+async def scan_all(symbols: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Escanea todos los símbolos. Retorna (señales, bloqueadas_por_tendencia)."""
     exchange = _build_exchange()
     signals  = []
+    blocked  = []
     try:
         for config in symbols:
             sig = await scan_symbol(exchange, config)
-            if sig:
+            if sig is None:
+                continue
+            if "blocked_reason" in sig:
+                blocked.append(sig)
+            else:
                 signals.append(sig)
     finally:
         await exchange.close()
-    return signals
+    return signals, blocked

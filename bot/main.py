@@ -11,12 +11,15 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
+import ccxt.async_support as ccxt_async
+
 from bot.config import settings
 from bot.state import (
     init_db, get_pool, get_all_positions, count_positions, get_total_pnl,
     get_paper_balance, get_today_stats, get_signal_log,
     is_replay, log_signal, get_current_dd_pct, get_peak_balance,
-    ensure_daily_stats,
+    ensure_daily_stats, is_blocked_logged, get_pending_blocked_signals,
+    update_blocked_outcome,
 )
 from bot.exchange import binance_exchange
 from bot.scanner import load_symbols, scan_all
@@ -52,8 +55,19 @@ async def _signal_scanner():
             continue
         try:
             logger.info(f"[SCANNER] Iniciando scan de {len(_symbols)} símbolos")
-            signals = await scan_all(_symbols)
-            logger.info(f"[SCANNER] {len(signals)} señal(es) detectada(s)")
+            signals, blocked = await scan_all(_symbols)
+            logger.info(f"[SCANNER] {len(signals)} señal(es), {len(blocked)} bloqueada(s) por tendencia 1H")
+
+            # Loguear señales bloqueadas por tendencia (sin marcarlas como processed)
+            for b in blocked:
+                if not await is_blocked_logged(b["symbol"], b["side"], b["candle_ts"]):
+                    ts_b = datetime.now(timezone.utc).isoformat()
+                    await log_signal(
+                        ts_b, b["symbol"], b["side"], b["price"],
+                        b["sl_price"], b["tp_price"],
+                        True, f"trend_1h|{b['candle_ts']}", 0.0, "blocked_trend",
+                        json.dumps({"outcome": "pending"})
+                    )
 
             # Máximo 2 entradas nuevas por ciclo para evitar concentración de riesgo
             new_entries = 0
@@ -264,6 +278,58 @@ async def _reconcile_loop():
             logger.error(f"[RECONCILE] {e}")
 
 
+async def _trend_outcome_evaluator():
+    """Cada 5 min evalúa si las señales bloqueadas por tendencia 1H hubieran ganado o perdido."""
+    while True:
+        await asyncio.sleep(300)
+        try:
+            pending = await get_pending_blocked_signals()
+            if not pending:
+                continue
+            ex = ccxt_async.binance({
+                "options": {"defaultType": "future"},
+                "enableRateLimit": True,
+            })
+            try:
+                for sig in pending:
+                    symbol   = sig["symbol"]
+                    side     = sig["side"]
+                    sl_price = float(sig["sl_price"] or 0)
+                    tp_price = float(sig["tp_price"] or 0)
+                    if not sl_price or not tp_price:
+                        continue
+                    try:
+                        sig_dt = datetime.fromisoformat(sig["ts"].replace("Z", "+00:00"))
+                        sig_ms = int(sig_dt.timestamp() * 1000)
+                        ohlcv  = await ex.fetch_ohlcv(symbol, "15m", since=sig_ms, limit=100)
+                    except Exception:
+                        continue
+
+                    outcome = "pending"
+                    for candle in ohlcv:
+                        c_ts, _, c_high, c_low, _, _ = candle
+                        if c_ts <= sig_ms:
+                            continue
+                        if side == "long":
+                            if c_high >= tp_price:
+                                outcome = "would_win"; break
+                            if c_low <= sl_price:
+                                outcome = "would_lose"; break
+                        else:
+                            if c_low <= tp_price:
+                                outcome = "would_win"; break
+                            if c_high >= sl_price:
+                                outcome = "would_lose"; break
+
+                    if outcome != "pending":
+                        await update_blocked_outcome(sig["id"], outcome)
+                        logger.info(f"[TREND-EVAL] {symbol} {side} → {outcome}")
+            finally:
+                await ex.close()
+        except Exception as e:
+            logger.error(f"[TREND-EVAL] {e}")
+
+
 # ── App lifespan ──────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -299,6 +365,7 @@ async def lifespan(app: FastAPI):
     monitor_task    = asyncio.create_task(_position_monitor())
     daily_task      = asyncio.create_task(_daily_tracker())
     reconcile_task  = asyncio.create_task(_reconcile_loop())
+    trend_eval_task = asyncio.create_task(_trend_outcome_evaluator())
 
     logger.info("Scalping Bot started")
     yield
@@ -469,6 +536,22 @@ async def api_analytics():
             FROM trades WHERE close_time IS NOT NULL
             GROUP BY hour ORDER BY hour
         """)
+        trend_rows = await conn.fetch("""
+            SELECT id, ts, symbol, side, price, sl_price, tp_price,
+                   CASE WHEN result_json LIKE '%would_win%'  THEN 'filtro_malo'
+                        WHEN result_json LIKE '%would_lose%' THEN 'filtro_bueno'
+                        ELSE 'pendiente'
+                   END AS outcome
+            FROM signal_log WHERE verdict = 'blocked_trend'
+            ORDER BY id DESC LIMIT 50
+        """)
+        trend_sum = await conn.fetchrow("""
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN result_json LIKE '%would_win%'  THEN 1 ELSE 0 END) AS filtro_malo,
+                   SUM(CASE WHEN result_json LIKE '%would_lose%' THEN 1 ELSE 0 END) AS filtro_bueno,
+                   SUM(CASE WHEN result_json NOT LIKE '%would_%'  THEN 1 ELSE 0 END) AS pendiente
+            FROM signal_log WHERE verdict = 'blocked_trend'
+        """)
     return {
         "by_symbol":      [dict(r) for r in sym_rows],
         "signals_symbol": [dict(r) for r in sig_sym_rows],
@@ -476,6 +559,8 @@ async def api_analytics():
         "by_verdict":     [dict(r) for r in sig_rows],
         "filter_dist":    [dict(r) for r in filter_dist],
         "by_hour":        [dict(r) for r in hour_rows],
+        "trend_blocked":  [dict(r) for r in trend_rows],
+        "trend_summary":  dict(trend_sum) if trend_sum else {},
     }
 
 
