@@ -173,9 +173,10 @@ async def _process_signal(sig: dict):
 
 
 async def _position_monitor():
-    """Chequea SL y TP contra precio real cada 60 segundos."""
+    """Chequea SL y TP: cada 5s en paper (emula exchange), cada 60s en real (backup)."""
+    interval = 5 if settings.TESTNET else 60
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(interval)
         try:
             positions = [dict(p) for p in await get_all_positions()]
             if not positions:
