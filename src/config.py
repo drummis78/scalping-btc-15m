@@ -5,16 +5,18 @@ load_dotenv()
 
 # Configuración de Símbolos (Top 50 aproximado por volumen en Binance)
 SYMBOLS = [
+    # Top market cap — ya descargados
     'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT',
     'ADA/USDT', 'AVAX/USDT', 'DOGE/USDT', 'DOT/USDT', 'LINK/USDT',
-    'MATIC/USDT', 'TRX/USDT', 'SHIB/USDT', 'LTC/USDT', 'BCH/USDT',
-    'UNI/USDT', 'NEAR/USDT', 'APT/USDT', 'OP/USDT', 'ARB/USDT',
-    'STX/USDT', 'RENDER/USDT', 'INJ/USDT', 'TIA/USDT', 'PEPE/USDT',
-    'FET/USDT', 'FTM/USDT', 'SUI/USDT', 'KAS/USDT', 'AAVE/USDT',
-    'ORDI/USDT', 'SEI/USDT', 'BEAM/USDT', 'IMX/USDT', 'LDO/USDT',
-    'FIL/USDT', 'ATOM/USDT', 'ETC/USDT', 'ICP/USDT', 'RNDR/USDT',
-    'GALA/USDT', 'GRT/USDT', 'THETA/USDT', 'MKR/USDT', 'SNX/USDT',
-    'ALGO/USDT', 'VET/USDT', 'FLOW/USDT', 'EGLD/USDT', 'QNT/USDT'
+    'TRX/USDT', 'LTC/USDT', 'BCH/USDT', 'UNI/USDT', 'NEAR/USDT',
+    'APT/USDT', 'OP/USDT', 'ARB/USDT', 'STX/USDT', 'RENDER/USDT',
+    'INJ/USDT', 'TIA/USDT', 'PEPE/USDT', 'FET/USDT', 'SUI/USDT',
+    'KAS/USDT', 'AAVE/USDT', 'ORDI/USDT', 'SEI/USDT', 'IMX/USDT',
+    'LDO/USDT', 'FIL/USDT', 'ATOM/USDT', 'ICP/USDT', 'GALA/USDT',
+    'MKR/USDT', 'ALGO/USDT', 'ETC/USDT', 'GRT/USDT', 'FTM/USDT',
+    # Nuevos top 50 — necesitan descarga
+    'TON/USDT', 'WIF/USDT', 'JUP/USDT', 'BONK/USDT', 'RUNE/USDT',
+    'WLD/USDT', 'PENDLE/USDT', 'JTO/USDT', 'TRB/USDT', 'PYTH/USDT',
 ]
 
 TIMEFRAME = '15m'

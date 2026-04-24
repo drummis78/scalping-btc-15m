@@ -51,6 +51,20 @@ def _build_exchange() -> ccxt_async.binance:
     })
 
 
+async def _get_1h_trend(exchange: ccxt_async.binance, symbol: str) -> Optional[str]:
+    """Retorna 'up', 'down' o None si no hay datos suficientes (EMA20 vs EMA50 en 1H)."""
+    try:
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe="1h", limit=60)
+        if len(ohlcv) < 52:
+            return None
+        closes = pd.Series([c[4] for c in ohlcv])
+        ema20 = closes.ewm(span=20, adjust=False).mean().iloc[-1]
+        ema50 = closes.ewm(span=50, adjust=False).mean().iloc[-1]
+        return "up" if ema20 > ema50 else "down"
+    except Exception:
+        return None
+
+
 async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[dict]:
     """
     Retorna un dict con señal o None si no hay breakout.
@@ -94,6 +108,10 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
         vol_ok = last_vol > vol_avg * config["vol_mult"]
 
         if last_high > upper and vol_ok:
+            trend = await _get_1h_trend(exchange, symbol)
+            if trend == "down":
+                logger.info(f"[SCANNER] {symbol} LONG bloqueado: tendencia 1H bajista (EMA20<EMA50)")
+                return None
             return {
                 "symbol":     symbol,
                 "side":       "long",
@@ -104,6 +122,10 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
                 "config":     config,
             }
         elif last_low < lower and vol_ok:
+            trend = await _get_1h_trend(exchange, symbol)
+            if trend == "up":
+                logger.info(f"[SCANNER] {symbol} SHORT bloqueado: tendencia 1H alcista (EMA20>EMA50)")
+                return None
             return {
                 "symbol":     symbol,
                 "side":       "short",
