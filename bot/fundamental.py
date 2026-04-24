@@ -24,7 +24,7 @@ IMPACT_BLOCK_THRESHOLD   = 7.0
 IMPACT_REDUCE_THRESHOLD  = 4.0
 FEAR_GREED_EXTREME_FEAR  = 20
 FEAR_GREED_EXTREME_GREED = 82
-IMPACT_WINDOW_HOURS      = 4
+IMPACT_WINDOW_HOURS      = 12
 
 CRITICAL_KEYWORDS = [
     "hacked", "hack", "exploit", "breach",
@@ -97,7 +97,7 @@ class FundamentalFilter:
     async def _poll_newsapi(self, session: aiohttp.ClientSession):
         if not settings.NEWSAPI_KEY:
             return
-        from_ts = (datetime.utcnow() - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%S")
+        from_ts = (datetime.utcnow() - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%S")
         params = {
             "apiKey":   settings.NEWSAPI_KEY,
             "q":        "bitcoin OR BTC OR crypto",
