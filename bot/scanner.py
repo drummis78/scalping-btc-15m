@@ -27,9 +27,9 @@ LOOKBACK      = 20      # Donchian channel period (15m)
 VOL_MULT      = 2.0     # volumen mínimo = 2x promedio
 SL_MULT       = 1.5     # SL = 1.5x ATR
 TP_MULT       = 3.5     # TP = 3.5x ATR  → ratio 2.33:1
-MIN_BODY_PCT  = 0.40    # cuerpo vela ≥ 40% del rango total
-MIN_ATR_PCT   = 0.003   # ATR ≥ 0.3% del precio (filtra flatlines)
-MAX_CHASE_PCT = 0.004   # precio no puede estar >0.4% más allá del nivel DC
+MIN_BODY_PCT  = 0.30    # cuerpo vela ≥ 30% del rango total
+MIN_ATR_PCT   = 0.002   # ATR ≥ 0.2% del precio (filtra flatlines)
+MAX_CHASE_PCT = 0.008   # precio no puede estar >0.8% más allá del nivel DC
 ACTIVE_HOURS  = set(range(7, 23))  # solo operar 07:00–22:59 UTC
 
 
