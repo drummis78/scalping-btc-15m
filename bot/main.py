@@ -43,8 +43,11 @@ _symbols: list[dict] = []
 async def _signal_scanner():
     """Escanea señales Donchian cada SCAN_INTERVAL segundos."""
     global _symbols
+    first_run = True
     while True:
-        await asyncio.sleep(settings.SCAN_INTERVAL)
+        if not first_run:
+            await asyncio.sleep(settings.SCAN_INTERVAL)
+        first_run = False
         if not _symbols:
             continue
         try:
