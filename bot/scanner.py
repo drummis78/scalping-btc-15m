@@ -31,6 +31,10 @@ MIN_BODY_PCT  = 0.25    # cuerpo vela ≥ 25% del rango total
 # Filtro horario desactivado en paper trading — activar en live con set(range(7, 23))
 ACTIVE_HOURS: set = set()
 
+# ── Funding Rate filter ───────────────────────────────────────────────────────
+FUNDING_LONG_BLOCK  =  0.001   # >+0.1%: longs pagan caro → no LONG
+FUNDING_SHORT_BLOCK = -0.0005  # <-0.05%: shorts pagan caro → no SHORT
+
 
 def load_symbols() -> list[dict]:
     try:
@@ -84,6 +88,15 @@ async def _get_1h_trend(exchange: ccxt_async.binance, symbol: str) -> Optional[s
             return "down"
         # Conflicto corto/macro: bloquear la dirección del corto plazo
         return "down" if short_up else "up"
+    except Exception:
+        return None
+
+
+async def _get_funding_rate(exchange: ccxt_async.binance, symbol: str) -> Optional[float]:
+    """Retorna el funding rate actual (ej: 0.001 = 0.1%). None si no disponible."""
+    try:
+        data = await exchange.fetch_funding_rate(symbol)
+        return float(data["fundingRate"])
     except Exception:
         return None
 
@@ -161,7 +174,15 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
                     "sl_price": sl_price, "tp_price": tp_price,
                     "candle_ts": candle_ts, "blocked_reason": "trend_1h_bearish",
                 }
-            logger.info(f"[SCANNER] ✅ {symbol} LONG entry={last_close} sl={sl_price} tp={tp_price}")
+            funding = await _get_funding_rate(exchange, symbol)
+            if funding is not None and funding > FUNDING_LONG_BLOCK:
+                logger.info(f"[SCANNER] {symbol} LONG bloqueado: funding={funding:.5f} > {FUNDING_LONG_BLOCK}")
+                return {
+                    "symbol": symbol, "side": "long", "price": last_close,
+                    "sl_price": sl_price, "tp_price": tp_price,
+                    "candle_ts": candle_ts, "blocked_reason": f"funding_high|{funding:.5f}",
+                }
+            logger.info(f"[SCANNER] ✅ {symbol} LONG entry={last_close} sl={sl_price} tp={tp_price} funding={funding}")
             return {
                 "symbol":    symbol,
                 "side":      "long",
@@ -184,7 +205,15 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
                     "sl_price": sl_price, "tp_price": tp_price,
                     "candle_ts": candle_ts, "blocked_reason": "trend_1h_bullish",
                 }
-            logger.info(f"[SCANNER] ✅ {symbol} SHORT entry={last_close} sl={sl_price} tp={tp_price}")
+            funding = await _get_funding_rate(exchange, symbol)
+            if funding is not None and funding < FUNDING_SHORT_BLOCK:
+                logger.info(f"[SCANNER] {symbol} SHORT bloqueado: funding={funding:.5f} < {FUNDING_SHORT_BLOCK}")
+                return {
+                    "symbol": symbol, "side": "short", "price": last_close,
+                    "sl_price": sl_price, "tp_price": tp_price,
+                    "candle_ts": candle_ts, "blocked_reason": f"funding_low|{funding:.5f}",
+                }
+            logger.info(f"[SCANNER] ✅ {symbol} SHORT entry={last_close} sl={sl_price} tp={tp_price} funding={funding}")
             return {
                 "symbol":    symbol,
                 "side":      "short",
