@@ -19,7 +19,7 @@ logger = logging.getLogger("scalping_bot.scanner")
 MIN_RETURN_PCT = 0.0    # cualquier retorno positivo
 MIN_WIN_RATE   = 42.0   # con 2.33:1 RR el breakeven es 30% WR
 MIN_TRADES     = 50
-TOP_N          = 20
+TOP_N          = 50
 EXCLUDED       = {"SHIB/USDT", "MATIC/USDT", "RNDR/USDT"}
 
 # ── Parámetros fijos de estrategia ────────────────────────────────────────────
