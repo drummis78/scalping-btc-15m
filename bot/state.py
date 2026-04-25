@@ -325,7 +325,7 @@ async def is_blocked_logged(symbol: str, side: str, candle_ts: str) -> bool:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow("""
             SELECT 1 FROM signal_log
-            WHERE symbol=$1 AND side=$2 AND verdict='blocked_trend' AND fund_reason LIKE $3
+            WHERE symbol=$1 AND side=$2 AND verdict IN ('blocked_trend','blocked_funding') AND fund_reason LIKE $3
         """, symbol, side, f"%{candle_ts}%")
     return row is not None
 
@@ -334,7 +334,7 @@ async def get_pending_blocked_signals() -> list:
     async with get_pool().acquire() as conn:
         rows = await conn.fetch("""
             SELECT * FROM signal_log
-            WHERE verdict IN ('blocked_trend', 'blocked_conflict') AND result_json LIKE '%pending%'
+            WHERE verdict IN ('blocked_trend', 'blocked_funding', 'blocked_conflict') AND result_json LIKE '%pending%'
             ORDER BY id ASC LIMIT 100
         """)
     return [dict(r) for r in rows]

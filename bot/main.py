@@ -58,15 +58,17 @@ async def _signal_scanner():
             signals, blocked = await scan_all(_symbols)
             logger.info(f"[SCANNER] {len(signals)} señal(es), {len(blocked)} bloqueada(s) por tendencia 1H")
 
-            # Loguear señales bloqueadas por tendencia (sin marcarlas como processed)
+            # Loguear señales bloqueadas por tendencia o funding (sin marcarlas como processed)
             for b in blocked:
                 if not await is_blocked_logged(b["symbol"], b["side"], b["candle_ts"]):
                     ts_b = datetime.now(timezone.utc).isoformat()
+                    reason = b.get("blocked_reason", "trend_1h")
+                    verdict = "blocked_funding" if reason.startswith("funding") else "blocked_trend"
                     await log_signal(
                         ts_b, b["symbol"], b["side"], b["price"],
                         b["sl_price"], b["tp_price"],
-                        True, f"trend_1h|{b['candle_ts']}", 0.0, "blocked_trend",
-                        json.dumps({"outcome": "pending"}),
+                        True, f"{reason}|{b['candle_ts']}", 0.0, verdict,
+                        json.dumps({"outcome": "pending", "blocked_reason": reason}),
                         b.get("strategy", "donchian")
                     )
 
@@ -599,6 +601,22 @@ async def api_analytics():
                    SUM(CASE WHEN result_json NOT LIKE '%would_%'  THEN 1 ELSE 0 END) AS pendiente
             FROM signal_log WHERE verdict = 'blocked_conflict'
         """)
+        funding_rows = await conn.fetch("""
+            SELECT id, ts, symbol, side, price, sl_price, tp_price, strategy, fund_reason,
+                   CASE WHEN result_json LIKE '%would_win%'  THEN 'filtro_malo'
+                        WHEN result_json LIKE '%would_lose%' THEN 'filtro_bueno'
+                        ELSE 'pendiente'
+                   END AS outcome
+            FROM signal_log WHERE verdict = 'blocked_funding'
+            ORDER BY id DESC LIMIT 50
+        """)
+        funding_sum = await conn.fetchrow("""
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN result_json LIKE '%would_win%'  THEN 1 ELSE 0 END) AS filtro_malo,
+                   SUM(CASE WHEN result_json LIKE '%would_lose%' THEN 1 ELSE 0 END) AS filtro_bueno,
+                   SUM(CASE WHEN result_json NOT LIKE '%would_%'  THEN 1 ELSE 0 END) AS pendiente
+            FROM signal_log WHERE verdict = 'blocked_funding'
+        """)
         strategy_signals = await conn.fetch("""
             SELECT strategy,
                    COUNT(*) AS total_signals,
@@ -630,6 +648,8 @@ async def api_analytics():
         "strategy_trades":    [dict(r) for r in strategy_trades],
         "conflict_blocked":   [dict(r) for r in conflict_rows],
         "conflict_summary":   dict(conflict_sum) if conflict_sum else {},
+        "funding_blocked":    [dict(r) for r in funding_rows],
+        "funding_summary":    dict(funding_sum) if funding_sum else {},
     }
 
 
