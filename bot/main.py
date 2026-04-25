@@ -262,11 +262,14 @@ async def _position_monitor():
                             (side == "short" and price <= entry - sl_dist)
                         )
                         if be_triggered:
-                            await update_position_sl("binance", symbol, side, entry, be_set=True)
-                            logger.info(f"[BE-STOP] {symbol} {side} SL → entry {entry:.4f}")
+                            fee_rt   = settings.COMMISSIONS.get("binance", 0.0004) * 2
+                            be_price = entry * (1 + fee_rt) if side == "long" else entry * (1 - fee_rt)
+                            be_price = round(be_price, 6)
+                            await update_position_sl("binance", symbol, side, be_price, be_set=True)
+                            logger.info(f"[BE-STOP] {symbol} {side} SL → {be_price:.6f} (entry+fees)")
                             await notifier.notify(
                                 f"🔒 *BE-STOP* `{side.upper()}` `{symbol}`\n"
-                                f"Precio: `${price:,.4f}` | SL movido a entry `${entry:,.4f}`"
+                                f"Precio: `${price:,.4f}` | SL movido a `${be_price:,.4f}` (entry+fees)"
                             )
 
         except Exception as e:
