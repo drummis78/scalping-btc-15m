@@ -39,6 +39,7 @@ async def init_db():
                 tp_order_id TEXT,
                 open_time   TEXT,
                 strategy    TEXT DEFAULT 'donchian',
+                be_set      BOOLEAN DEFAULT FALSE,
                 PRIMARY KEY (exchange, symbol, side)
             )
         """)
@@ -93,6 +94,9 @@ async def init_db():
             await conn.execute(
                 f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS strategy TEXT DEFAULT 'donchian'"
             )
+        await conn.execute(
+            "ALTER TABLE positions ADD COLUMN IF NOT EXISTS be_set BOOLEAN DEFAULT FALSE"
+        )
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_stats (
                 date          TEXT PRIMARY KEY,
@@ -192,6 +196,15 @@ async def remove_position(exchange: str, symbol: str, side: str,
             exchange, symbol, side
         )
     return pnl_usd
+
+
+async def update_position_sl(exchange: str, symbol: str, side: str,
+                              sl_price: float, be_set: bool = False):
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "UPDATE positions SET sl_price=$1, be_set=$2 WHERE exchange=$3 AND symbol=$4 AND side=$5",
+            sl_price, be_set, exchange, symbol, side
+        )
 
 
 # ── Paper balance ─────────────────────────────────────────────────────────────

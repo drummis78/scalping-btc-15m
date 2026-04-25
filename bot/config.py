@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     MAX_POSITIONS:        int   = 6
     RISK_PER_TRADE:       float = 0.015   # 1.5% equity por trade
 
+    BE_STOP_ENABLED:      bool  = True    # mover SL a entry cuando profit >= SL_dist
+    ACTIVE_HOURS_BLOCK:   str   = "4,5,6,11"  # horas UTC bloqueadas: 04-06 + 11 (0% WR)
+
     FUNDAMENTAL_ENABLED:       bool = True
     FUNDAMENTAL_POLL_INTERVAL: int  = 1800
     NEWSAPI_KEY:               str  = ""

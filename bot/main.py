@@ -19,7 +19,7 @@ from bot.state import (
     get_paper_balance, get_today_stats, get_signal_log,
     is_replay, log_signal, get_current_dd_pct, get_peak_balance,
     ensure_daily_stats, is_blocked_logged, get_pending_blocked_signals,
-    update_blocked_outcome, get_position,
+    update_blocked_outcome, get_position, update_position_sl,
 )
 from bot.exchange import binance_exchange
 from bot.scanner import load_symbols, scan_all
@@ -251,6 +251,23 @@ async def _position_monitor():
                             f"📍 Entry: `${pos['entry_price']:,.4f}` → Exit: `${close_price:,.4f}`\n"
                             f"💰 PnL: `{'+'if pnl>=0 else ''}${pnl:.2f}`"
                         )
+
+                # BE Stop: mover SL a entry cuando profit >= SL_dist (una sola vez)
+                elif settings.BE_STOP_ENABLED and sl and not pos.get("be_set"):
+                    entry   = pos["entry_price"]
+                    sl_dist = abs(entry - sl)
+                    if sl_dist > 0:
+                        be_triggered = (
+                            (side == "long"  and price >= entry + sl_dist) or
+                            (side == "short" and price <= entry - sl_dist)
+                        )
+                        if be_triggered:
+                            await update_position_sl("binance", symbol, side, entry, be_set=True)
+                            logger.info(f"[BE-STOP] {symbol} {side} SL → entry {entry:.4f}")
+                            await notifier.notify(
+                                f"🔒 *BE-STOP* `{side.upper()}` `{symbol}`\n"
+                                f"Precio: `${price:,.4f}` | SL movido a entry `${entry:,.4f}`"
+                            )
 
         except Exception as e:
             logger.error(f"[POSITION-MONITOR] {e}")

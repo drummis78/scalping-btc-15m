@@ -30,6 +30,9 @@ TP_MULT       = 3.5     # TP = 3.5x ATR  → ratio 2.33:1
 MIN_BODY_PCT  = 0.25    # cuerpo vela ≥ 25% del rango total
 # Filtro horario desactivado en paper trading — activar en live con set(range(7, 23))
 ACTIVE_HOURS: set = set()
+# Horas UTC bloqueadas (0% WR histórico): 04-06 apertura Asia silenciosa, 11 UTC spike
+BLOCKED_HOURS: set = {int(h) for h in settings.ACTIVE_HOURS_BLOCK.split(",") if h.strip()} \
+    if getattr(settings, "ACTIVE_HOURS_BLOCK", "") else set()
 
 # ── Funding Rate filter ───────────────────────────────────────────────────────
 FUNDING_LONG_BLOCK  =  0.001   # >+0.1%: longs pagan caro → no LONG
@@ -113,8 +116,11 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
     """
     symbol = config["symbol"]
 
-    # Filtro horario: solo activo si ACTIVE_HOURS no está vacío
-    if ACTIVE_HOURS and datetime.now(timezone.utc).hour not in ACTIVE_HOURS:
+    # Filtro horario: allow-list (vacío = todo habilitado) y block-list explícita
+    now_hour = datetime.now(timezone.utc).hour
+    if ACTIVE_HOURS and now_hour not in ACTIVE_HOURS:
+        return None
+    if BLOCKED_HOURS and now_hour in BLOCKED_HOURS:
         return None
 
     try:
@@ -243,7 +249,10 @@ async def scan_symbol_tcp(exchange: ccxt_async.binance, config: dict) -> Optiona
     SL=1.2xATR, TP=2.5xATR (~2:1 ratio).
     """
     symbol = config["symbol"]
-    if ACTIVE_HOURS and datetime.now(timezone.utc).hour not in ACTIVE_HOURS:
+    now_hour = datetime.now(timezone.utc).hour
+    if ACTIVE_HOURS and now_hour not in ACTIVE_HOURS:
+        return None
+    if BLOCKED_HOURS and now_hour in BLOCKED_HOURS:
         return None
     try:
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe="15m", limit=65)
