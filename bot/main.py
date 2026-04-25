@@ -99,9 +99,12 @@ async def _process_signal(sig: dict):
         logger.debug(f"[REPLAY] {symbol} {side} candle={candle_ts}")
         return
 
-    # Posición ya abierta para este símbolo/lado
+    # Posición ya abierta para este símbolo/lado — loguear para análisis posterior
     if await get_position("binance", symbol, side):
-        logger.debug(f"[SKIP] {symbol} {side} — posición ya abierta")
+        logger.debug(f"[SKIP] {symbol} {side} — posición ya abierta ({strategy})")
+        await log_signal(ts, symbol, side, price, sl_price, tp_price,
+                         True, f"conflict|pos_abierta|{candle_ts}", 0.0, "blocked_conflict",
+                         json.dumps({"outcome": "pending"}), strategy)
         return
 
     # Max posiciones
@@ -560,6 +563,22 @@ async def api_analytics():
                    SUM(CASE WHEN result_json NOT LIKE '%would_%'  THEN 1 ELSE 0 END) AS pendiente
             FROM signal_log WHERE verdict = 'blocked_trend'
         """)
+        conflict_rows = await conn.fetch("""
+            SELECT id, ts, symbol, side, price, sl_price, tp_price, strategy,
+                   CASE WHEN result_json LIKE '%would_win%'  THEN 'hubiera_ganado'
+                        WHEN result_json LIKE '%would_lose%' THEN 'hubiera_perdido'
+                        ELSE 'pendiente'
+                   END AS outcome
+            FROM signal_log WHERE verdict = 'blocked_conflict'
+            ORDER BY id DESC LIMIT 50
+        """)
+        conflict_sum = await conn.fetchrow("""
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN result_json LIKE '%would_win%'  THEN 1 ELSE 0 END) AS hubiera_ganado,
+                   SUM(CASE WHEN result_json LIKE '%would_lose%' THEN 1 ELSE 0 END) AS hubiera_perdido,
+                   SUM(CASE WHEN result_json NOT LIKE '%would_%'  THEN 1 ELSE 0 END) AS pendiente
+            FROM signal_log WHERE verdict = 'blocked_conflict'
+        """)
         strategy_signals = await conn.fetch("""
             SELECT strategy,
                    COUNT(*) AS total_signals,
@@ -589,6 +608,8 @@ async def api_analytics():
         "trend_summary":      dict(trend_sum) if trend_sum else {},
         "strategy_signals":   [dict(r) for r in strategy_signals],
         "strategy_trades":    [dict(r) for r in strategy_trades],
+        "conflict_blocked":   [dict(r) for r in conflict_rows],
+        "conflict_summary":   dict(conflict_sum) if conflict_sum else {},
     }
 
 

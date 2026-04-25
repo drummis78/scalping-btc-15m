@@ -321,7 +321,7 @@ async def get_pending_blocked_signals() -> list:
     async with get_pool().acquire() as conn:
         rows = await conn.fetch("""
             SELECT * FROM signal_log
-            WHERE verdict = 'blocked_trend' AND result_json LIKE '%pending%'
+            WHERE verdict IN ('blocked_trend', 'blocked_conflict') AND result_json LIKE '%pending%'
             ORDER BY id ASC LIMIT 100
         """)
     return [dict(r) for r in rows]
