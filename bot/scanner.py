@@ -62,15 +62,28 @@ def _build_exchange() -> ccxt_async.binance:
 
 
 async def _get_1h_trend(exchange: ccxt_async.binance, symbol: str) -> Optional[str]:
-    """'up' si EMA20 > EMA50 en 1H, 'down' si no, None si sin datos."""
+    """
+    'up'   si EMA20>EMA50 Y precio>EMA200 en 1H  → habilita LONG
+    'down' si EMA20<EMA50 Y precio<EMA200 en 1H  → habilita SHORT
+    Caso mixto (corto vs macro en conflicto): bloquea la dirección del corto plazo.
+    """
     try:
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe="1h", limit=60)
-        if len(ohlcv) < 52:
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe="1h", limit=210)
+        if len(ohlcv) < 202:
             return None
-        closes = pd.Series([c[4] for c in ohlcv])
-        ema20 = closes.ewm(span=20, adjust=False).mean().iloc[-1]
-        ema50 = closes.ewm(span=50, adjust=False).mean().iloc[-1]
-        return "up" if ema20 > ema50 else "down"
+        closes    = pd.Series([c[4] for c in ohlcv])
+        last_close = float(closes.iloc[-1])
+        ema20  = float(closes.ewm(span=20,  adjust=False).mean().iloc[-1])
+        ema50  = float(closes.ewm(span=50,  adjust=False).mean().iloc[-1])
+        ema200 = float(closes.ewm(span=200, adjust=False).mean().iloc[-1])
+        short_up = ema20 > ema50
+        macro_up = last_close > ema200
+        if short_up and macro_up:
+            return "up"
+        if not short_up and not macro_up:
+            return "down"
+        # Conflicto corto/macro: bloquear la dirección del corto plazo
+        return "down" if short_up else "up"
     except Exception:
         return None
 
