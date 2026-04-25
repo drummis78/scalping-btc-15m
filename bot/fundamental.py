@@ -71,12 +71,15 @@ class FundamentalFilter:
             await asyncio.sleep(settings.FUNDAMENTAL_POLL_INTERVAL)
 
     async def _poll_all(self):
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            await asyncio.gather(
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+            results = await asyncio.gather(
                 self._poll_fear_greed(session),
                 self._poll_newsapi(session),
                 return_exceptions=True
             )
+            for r in results:
+                if isinstance(r, Exception):
+                    logger.error(f"[FUNDAMENTAL] Poll error: {r}")
 
     async def _poll_fear_greed(self, session: aiohttp.ClientSession):
         async with session.get(FEAR_GREED_URL) as resp:
@@ -107,13 +110,16 @@ class FundamentalFilter:
             "from":     from_ts,
         }
         async with session.get(NEWSAPI_URL, params=params) as resp:
+            body = await resp.text()
             if resp.status != 200:
-                logger.warning(f"[FUNDAMENTAL] NewsAPI status {resp.status}")
+                logger.warning(f"[FUNDAMENTAL] NewsAPI status {resp.status}: {body[:200]}")
                 return
             data = await resp.json(content_type=None)
 
+        articles = data.get("articles", [])
+        logger.info(f"[FUNDAMENTAL] NewsAPI: {len(articles)} artículos recibidos, status={data.get('status')}")
         events = []
-        for item in data.get("articles", []):
+        for item in articles:
             title = (item.get("title") or "")[:200]
             if not title or title == "[Removed]":
                 continue
