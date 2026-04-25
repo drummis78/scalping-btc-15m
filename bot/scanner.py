@@ -23,11 +23,11 @@ TOP_N          = 20
 EXCLUDED       = {"SHIB/USDT", "MATIC/USDT", "RNDR/USDT"}
 
 # ── Parámetros fijos de estrategia ────────────────────────────────────────────
-LOOKBACK      = 20      # Donchian channel period (15m)
-VOL_MULT      = 1.5     # volumen mínimo = 1.5x promedio
+LOOKBACK      = 30      # Donchian channel period (15m) — canal más largo, menos falsos breakouts
+VOL_MULT      = 2.0     # volumen mínimo = 2x promedio — mayor confirmación
 SL_MULT       = 1.5     # SL = 1.5x ATR
 TP_MULT       = 3.5     # TP = 3.5x ATR  → ratio 2.33:1
-MIN_BODY_PCT  = 0.25    # cuerpo vela ≥ 25% del rango total
+MIN_BODY_PCT  = 0.35    # cuerpo vela ≥ 35% del rango total — filtra más mechas
 # Filtro horario desactivado en paper trading — activar en live con set(range(7, 23))
 ACTIVE_HOURS: set = set()
 # Horas UTC bloqueadas (0% WR histórico): 04-06 apertura Asia silenciosa, 11 UTC spike
@@ -124,7 +124,7 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
         return None
 
     try:
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe="15m", limit=LOOKBACK + 10)
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe="15m", limit=LOOKBACK + 20)
         if len(ohlcv) < LOOKBACK + 2:
             return None
 
