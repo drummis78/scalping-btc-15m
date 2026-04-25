@@ -66,7 +66,8 @@ async def _signal_scanner():
                         ts_b, b["symbol"], b["side"], b["price"],
                         b["sl_price"], b["tp_price"],
                         True, f"trend_1h|{b['candle_ts']}", 0.0, "blocked_trend",
-                        json.dumps({"outcome": "pending"})
+                        json.dumps({"outcome": "pending"}),
+                        b.get("strategy", "donchian")
                     )
 
             # Máximo 2 entradas nuevas por ciclo para evitar concentración de riesgo
@@ -90,10 +91,11 @@ async def _process_signal(sig: dict):
     sl_price  = sig["sl_price"]
     tp_price  = sig["tp_price"]
     candle_ts = sig["candle_ts"]
+    strategy  = sig.get("strategy", "donchian")
     ts        = datetime.now(timezone.utc).isoformat()
 
-    # Anti-replay por vela
-    if await is_replay(symbol, side, candle_ts):
+    # Anti-replay por vela (incluye strategy para permitir ambas en misma vela)
+    if await is_replay(symbol, side, candle_ts, strategy):
         logger.debug(f"[REPLAY] {symbol} {side} candle={candle_ts}")
         return
 
@@ -106,7 +108,7 @@ async def _process_signal(sig: dict):
     if await count_positions() >= settings.MAX_POSITIONS:
         logger.info(f"[SKIP] {symbol} {side} — max_positions={settings.MAX_POSITIONS}")
         await log_signal(ts, symbol, side, price, sl_price, tp_price,
-                         True, "max_positions", 0.0, "skipped_max_positions")
+                         True, "max_positions", 0.0, "skipped_max_positions", "", strategy)
         return
 
     # Circuit breaker — DD global
@@ -129,7 +131,7 @@ async def _process_signal(sig: dict):
         logger.error(f"[CIRCUIT BREAKER] dd={dd:.1f}% peak=${peak:.2f} current=${balance:.2f}")
         await notifier.notify(msg)
         await log_signal(ts, symbol, side, price, sl_price, tp_price,
-                         True, f"circuit_breaker dd={dd:.1f}%", 0.0, "circuit_breaker")
+                         True, f"circuit_breaker dd={dd:.1f}%", 0.0, "circuit_breaker", "", strategy)
         return
 
     # Circuit breaker — pérdida diaria
@@ -140,7 +142,7 @@ async def _process_signal(sig: dict):
             f"Pérdida del día: `${daily['realized_pnl']:+.2f}` | Límite: `{settings.MAX_DAILY_LOSS_PCT}%`"
         )
         await log_signal(ts, symbol, side, price, sl_price, tp_price,
-                         True, "max_daily_loss", 0.0, "circuit_breaker_daily")
+                         True, "max_daily_loss", 0.0, "circuit_breaker_daily", "", strategy)
         return
 
     # Fundamental filter
@@ -160,7 +162,7 @@ async def _process_signal(sig: dict):
             f"Score: `{_fund_impact:.1f}` | `{_fund_reason}`"
         )
         await log_signal(ts, symbol, side, price, sl_price, tp_price,
-                         False, _fund_reason, _fund_impact, "filtered_fundamental")
+                         False, _fund_reason, _fund_impact, "filtered_fundamental", "", strategy)
         return
 
     # Ejecutar
@@ -168,12 +170,13 @@ async def _process_signal(sig: dict):
         symbol, side, price, sl_price, tp_price, settings.MAX_LEVERAGE,
         fund_reduce=fund.get("reduce_size", False),
         fund_boost=fund.get("boost_size", False),
+        strategy=strategy,
     )
 
     await log_signal(ts, symbol, side, price, sl_price, tp_price,
                      _fund_allow, _fund_reason, _fund_impact,
                      "executed" if result["status"] == "success" else f"error_{result.get('reason','')}",
-                     json.dumps(result))
+                     json.dumps(result), strategy)
 
     if result["status"] == "success":
         lev = result.get("leverage", settings.MAX_LEVERAGE)
@@ -557,6 +560,24 @@ async def api_analytics():
                    SUM(CASE WHEN result_json NOT LIKE '%would_%'  THEN 1 ELSE 0 END) AS pendiente
             FROM signal_log WHERE verdict = 'blocked_trend'
         """)
+        strategy_signals = await conn.fetch("""
+            SELECT strategy,
+                   COUNT(*) AS total_signals,
+                   SUM(CASE WHEN verdict='executed' THEN 1 ELSE 0 END) AS ejecutadas,
+                   SUM(CASE WHEN verdict='blocked_trend' THEN 1 ELSE 0 END) AS bloqueadas_trend,
+                   SUM(CASE WHEN verdict='filtered_fundamental' THEN 1 ELSE 0 END) AS bloqueadas_ia
+            FROM signal_log GROUP BY strategy ORDER BY strategy
+        """)
+        strategy_trades = await conn.fetch("""
+            SELECT strategy,
+                   COUNT(*) AS trades,
+                   SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                   ROUND(SUM(pnl)::numeric, 2) AS total_pnl,
+                   ROUND(AVG(pnl)::numeric, 2) AS avg_pnl,
+                   SUM(CASE WHEN close_reason='tp_hit' THEN 1 ELSE 0 END) AS tp_hits,
+                   SUM(CASE WHEN close_reason='sl_hit' THEN 1 ELSE 0 END) AS sl_hits
+            FROM trades GROUP BY strategy ORDER BY strategy
+        """)
     return {
         "by_symbol":      [dict(r) for r in sym_rows],
         "signals_symbol": [dict(r) for r in sig_sym_rows],
@@ -564,8 +585,10 @@ async def api_analytics():
         "by_verdict":     [dict(r) for r in sig_rows],
         "filter_dist":    [dict(r) for r in filter_dist],
         "by_hour":        [dict(r) for r in hour_rows],
-        "trend_blocked":  [dict(r) for r in trend_rows],
-        "trend_summary":  dict(trend_sum) if trend_sum else {},
+        "trend_blocked":      [dict(r) for r in trend_rows],
+        "trend_summary":      dict(trend_sum) if trend_sum else {},
+        "strategy_signals":   [dict(r) for r in strategy_signals],
+        "strategy_trades":    [dict(r) for r in strategy_trades],
     }
 
 

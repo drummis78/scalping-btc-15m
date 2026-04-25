@@ -93,7 +93,8 @@ class BinanceExchange:
     async def open_position(self, symbol: str, side: str, price: float,
                             sl_price: float, tp_price: float,
                             leverage: float, fund_reduce: bool = False,
-                            fund_boost: bool = False) -> dict:
+                            fund_boost: bool = False,
+                            strategy: str = "donchian") -> dict:
         async with self._get_lock(symbol, side):
             existing = await get_position(EXCHANGE_NAME, symbol, side)
             if existing:
@@ -116,11 +117,11 @@ class BinanceExchange:
             qty      = notional / price
 
             if settings.TESTNET:
-                return await self._paper_open(symbol, side, price, qty, leverage, sl_price, tp_price)
+                return await self._paper_open(symbol, side, price, qty, leverage, sl_price, tp_price, strategy)
             else:
-                return await self._real_open(symbol, side, price, qty, leverage, sl_price, tp_price)
+                return await self._real_open(symbol, side, price, qty, leverage, sl_price, tp_price, strategy)
 
-    async def _paper_open(self, symbol, side, price, qty, leverage, sl_price, tp_price) -> dict:
+    async def _paper_open(self, symbol, side, price, qty, leverage, sl_price, tp_price, strategy="donchian") -> dict:
         commission = price * qty * COMMISSIONS
         balance = await get_paper_balance()
         margin  = price * qty / leverage
@@ -128,12 +129,12 @@ class BinanceExchange:
             return {"status": "error", "reason": "insufficient_balance",
                     "symbol": symbol, "side": side}
         await save_paper_balance(balance - margin - commission)
-        await save_position(EXCHANGE_NAME, symbol, side, price, qty, leverage, sl_price, tp_price)
+        await save_position(EXCHANGE_NAME, symbol, side, price, qty, leverage, sl_price, tp_price, strategy=strategy)
         logger.info(f"[PAPER] OPEN {side.upper()} {symbol} qty={qty:.6f} @ {price:.4f} SL={sl_price:.4f} TP={tp_price:.4f}")
         return {"status": "success", "symbol": symbol, "side": side,
                 "price": price, "qty": qty, "sl_price": sl_price, "tp_price": tp_price}
 
-    async def _real_open(self, symbol, side, price, qty, leverage, sl_price, tp_price) -> dict:
+    async def _real_open(self, symbol, side, price, qty, leverage, sl_price, tp_price, strategy="donchian") -> dict:
         ex = _build_exchange()
         order_side    = "buy"  if side == "long"  else "sell"
         position_side = "LONG" if side == "long"  else "SHORT"
@@ -186,7 +187,7 @@ class BinanceExchange:
                 logger.error(f"[TP] Placement falló {symbol} {side}: {e}")
 
             await save_position(EXCHANGE_NAME, symbol, side, fill_price, float(qty_str),
-                                leverage, sl_price, tp_price, sl_order_id, tp_order_id)
+                                leverage, sl_price, tp_price, sl_order_id, tp_order_id, strategy=strategy)
             return {"status": "success", "symbol": symbol, "side": side,
                     "price": fill_price, "qty": float(qty_str),
                     "sl_price": sl_price, "tp_price": tp_price,

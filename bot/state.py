@@ -38,6 +38,7 @@ async def init_db():
                 sl_order_id TEXT,
                 tp_order_id TEXT,
                 open_time   TEXT,
+                strategy    TEXT DEFAULT 'donchian',
                 PRIMARY KEY (exchange, symbol, side)
             )
         """)
@@ -54,7 +55,8 @@ async def init_db():
                 pnl          REAL,
                 close_reason TEXT DEFAULT '',
                 open_time    TEXT,
-                close_time   TEXT
+                close_time   TEXT,
+                strategy     TEXT DEFAULT 'donchian'
             )
         """)
         await conn.execute("""
@@ -82,9 +84,15 @@ async def init_db():
                 fund_reason TEXT DEFAULT '',
                 fund_impact REAL DEFAULT 0,
                 verdict     TEXT DEFAULT 'executed',
-                result_json TEXT DEFAULT ''
+                result_json TEXT DEFAULT '',
+                strategy    TEXT DEFAULT 'donchian'
             )
         """)
+        # Migración: agregar columnas strategy a tablas existentes (idempotente)
+        for tbl in ("signal_log", "positions", "trades"):
+            await conn.execute(
+                f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS strategy TEXT DEFAULT 'donchian'"
+            )
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_stats (
                 date          TEXT PRIMARY KEY,
@@ -112,8 +120,8 @@ async def init_db():
 
 # ── Anti-replay ───────────────────────────────────────────────────────────────
 
-async def is_replay(symbol: str, side: str, candle_ts: str, ttl_seconds: int = 300) -> bool:
-    key    = hashlib.md5(f"{symbol}|{side}|{candle_ts}|SCALP".encode()).hexdigest()
+async def is_replay(symbol: str, side: str, candle_ts: str, strategy: str = "donchian", ttl_seconds: int = 300) -> bool:
+    key    = hashlib.md5(f"{symbol}|{side}|{candle_ts}|SCALP|{strategy}".encode()).hexdigest()
     cutoff = (datetime.utcnow() - timedelta(seconds=ttl_seconds)).isoformat()
     async with get_pool().acquire() as conn:
         await conn.execute("DELETE FROM processed_signals WHERE ts < $1", cutoff)
@@ -150,16 +158,16 @@ async def count_positions() -> int:
 async def save_position(exchange: str, symbol: str, side: str, entry_price: float,
                         qty: float, leverage: float, sl_price: float = None,
                         tp_price: float = None, sl_order_id: str = None,
-                        tp_order_id: str = None):
+                        tp_order_id: str = None, strategy: str = "donchian"):
     async with get_pool().acquire() as conn:
         await conn.execute("""
-            INSERT INTO positions VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+            INSERT INTO positions VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
             ON CONFLICT (exchange, symbol, side) DO UPDATE SET
                 entry_price=$4, qty=$5, leverage=$6, sl_price=$7, tp_price=$8,
-                sl_order_id=$9, tp_order_id=$10, open_time=$11
+                sl_order_id=$9, tp_order_id=$10, open_time=$11, strategy=$12
         """, exchange, symbol, side, entry_price, qty, leverage,
              sl_price, tp_price, sl_order_id, tp_order_id,
-             datetime.now(timezone.utc).isoformat())
+             datetime.now(timezone.utc).isoformat(), strategy)
 
 
 async def remove_position(exchange: str, symbol: str, side: str,
@@ -169,15 +177,16 @@ async def remove_position(exchange: str, symbol: str, side: str,
         return 0.0
     sign    = 1 if side == "long" else -1
     pnl_usd = (exit_price - pos["entry_price"]) * sign * pos["qty"] * pos["leverage"]
+    strategy = pos.get("strategy") or "donchian"
     async with get_pool().acquire() as conn:
         await conn.execute("""
             INSERT INTO trades
             (exchange, symbol, side, entry_price, exit_price, qty, leverage, pnl,
-             close_reason, open_time, close_time)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+             close_reason, open_time, close_time, strategy)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
         """, exchange, symbol, side, pos["entry_price"], exit_price, pos["qty"],
              pos["leverage"], pnl_usd, close_reason, pos["open_time"],
-             datetime.now(timezone.utc).isoformat())
+             datetime.now(timezone.utc).isoformat(), strategy)
         await conn.execute(
             "DELETE FROM positions WHERE exchange=$1 AND symbol=$2 AND side=$3",
             exchange, symbol, side
@@ -280,15 +289,15 @@ async def get_current_dd_pct(initial: float, current_balance: float) -> float:
 async def log_signal(ts: str, symbol: str, side: str, price: float,
                      sl_price: float, tp_price: float,
                      fund_allow: bool, fund_reason: str, fund_impact: float,
-                     verdict: str, result_json: str = ""):
+                     verdict: str, result_json: str = "", strategy: str = "donchian"):
     async with get_pool().acquire() as conn:
         await conn.execute("""
             INSERT INTO signal_log
             (ts, symbol, side, price, sl_price, tp_price,
-             fund_allow, fund_reason, fund_impact, verdict, result_json)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+             fund_allow, fund_reason, fund_impact, verdict, result_json, strategy)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
         """, ts, symbol, side, price, sl_price, tp_price,
-             1 if fund_allow else 0, fund_reason, fund_impact, verdict, result_json)
+             1 if fund_allow else 0, fund_reason, fund_impact, verdict, result_json, strategy)
 
 
 async def get_signal_log(limit: int = 200) -> list:

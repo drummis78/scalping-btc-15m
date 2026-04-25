@@ -35,6 +35,11 @@ ACTIVE_HOURS: set = set()
 FUNDING_LONG_BLOCK  =  0.001   # >+0.1%: longs pagan caro → no LONG
 FUNDING_SHORT_BLOCK = -0.0005  # <-0.05%: shorts pagan caro → no SHORT
 
+# ── TCP — Trend-Continuity Pullback (estrategia paralela) ────────────────────
+TCP_SL_MULT  = 1.2   # SL = 1.2x ATR
+TCP_TP_MULT  = 2.5   # TP = 2.5x ATR  → ratio ~2:1
+TCP_ZONE_PCT = 0.003 # 0.3% tolerancia para "toca EMA20"
+
 
 def load_symbols() -> list[dict]:
     try:
@@ -230,20 +235,128 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
         return None
 
 
+async def scan_symbol_tcp(exchange: ccxt_async.binance, config: dict) -> Optional[dict]:
+    """
+    TCP — Trend-Continuity Pullback en 15m.
+    LONG: EMA20>EMA50, low toca EMA20, cierra sobre EMA20, RSI 40-55, vela verde, volumen > prev 2.
+    SHORT: EMA20<EMA50, high toca EMA20, cierra bajo EMA20, RSI 45-60, vela roja, volumen > prev 2.
+    SL=1.2xATR, TP=2.5xATR (~2:1 ratio).
+    """
+    symbol = config["symbol"]
+    if ACTIVE_HOURS and datetime.now(timezone.utc).hour not in ACTIVE_HOURS:
+        return None
+    try:
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe="15m", limit=65)
+        if len(ohlcv) < 55:
+            return None
+
+        df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+
+        df.ta.atr(length=14, append=True)
+        atr_col = [c for c in df.columns if c.startswith("ATR")]
+        if not atr_col or pd.isna(df[atr_col[0]].iloc[-1]):
+            return None
+        atr = float(df[atr_col[0]].iloc[-1])
+
+        df.ta.rsi(length=14, append=True)
+        rsi_col = [c for c in df.columns if c.startswith("RSI")]
+        if not rsi_col:
+            return None
+
+        closes = df["close"]
+        ema20 = float(closes.ewm(span=20, adjust=False).mean().iloc[-2])
+        ema50 = float(closes.ewm(span=50, adjust=False).mean().iloc[-2])
+        rsi   = float(df[rsi_col[0]].iloc[-2])
+
+        last       = df.iloc[-2]
+        candle_ts  = str(int(last["timestamp"]))
+        last_close = float(last["close"])
+        last_open  = float(last["open"])
+        last_high  = float(last["high"])
+        last_low   = float(last["low"])
+        last_vol   = float(last["volume"])
+        prev2_vol  = float(df["volume"].iloc[-4:-2].mean())
+        vol_ok     = prev2_vol > 0 and last_vol > prev2_vol
+
+        if pd.isna(rsi) or ema20 == 0 or ema50 == 0:
+            return None
+
+        # ── TCP LONG ──────────────────────────────────────────────────────────
+        if ema20 > ema50:
+            touched = last_low <= ema20 * (1 + TCP_ZONE_PCT) and last_close >= ema20 * (1 - TCP_ZONE_PCT)
+            rsi_ok  = 40 <= rsi <= 55
+            green   = last_close > last_open
+            if touched and rsi_ok and green and vol_ok:
+                sl_price = round(last_close - atr * TCP_SL_MULT, 6)
+                tp_price = round(last_close + atr * TCP_TP_MULT, 6)
+                trend = await _get_1h_trend(exchange, symbol)
+                if trend == "down":
+                    logger.info(f"[TCP] {symbol} LONG bloqueado: 1H bajista")
+                    return {"symbol": symbol, "side": "long", "price": last_close,
+                            "sl_price": sl_price, "tp_price": tp_price,
+                            "candle_ts": candle_ts, "blocked_reason": "trend_1h_bearish",
+                            "strategy": "tcp"}
+                funding = await _get_funding_rate(exchange, symbol)
+                if funding is not None and funding > FUNDING_LONG_BLOCK:
+                    logger.info(f"[TCP] {symbol} LONG bloqueado: funding={funding:.5f}")
+                    return {"symbol": symbol, "side": "long", "price": last_close,
+                            "sl_price": sl_price, "tp_price": tp_price,
+                            "candle_ts": candle_ts, "blocked_reason": f"funding_high|{funding:.5f}",
+                            "strategy": "tcp"}
+                logger.info(f"[TCP] ✅ {symbol} LONG pullback entry={last_close} ema20={ema20:.4f} rsi={rsi:.1f}")
+                return {"symbol": symbol, "side": "long", "price": last_close,
+                        "sl_price": sl_price, "tp_price": tp_price,
+                        "candle_ts": candle_ts, "strategy": "tcp"}
+
+        # ── TCP SHORT ─────────────────────────────────────────────────────────
+        elif ema20 < ema50:
+            touched = last_high >= ema20 * (1 - TCP_ZONE_PCT) and last_close <= ema20 * (1 + TCP_ZONE_PCT)
+            rsi_ok  = 45 <= rsi <= 60
+            red     = last_close < last_open
+            if touched and rsi_ok and red and vol_ok:
+                sl_price = round(last_close + atr * TCP_SL_MULT, 6)
+                tp_price = round(last_close - atr * TCP_TP_MULT, 6)
+                trend = await _get_1h_trend(exchange, symbol)
+                if trend == "up":
+                    logger.info(f"[TCP] {symbol} SHORT bloqueado: 1H alcista")
+                    return {"symbol": symbol, "side": "short", "price": last_close,
+                            "sl_price": sl_price, "tp_price": tp_price,
+                            "candle_ts": candle_ts, "blocked_reason": "trend_1h_bullish",
+                            "strategy": "tcp"}
+                funding = await _get_funding_rate(exchange, symbol)
+                if funding is not None and funding < FUNDING_SHORT_BLOCK:
+                    logger.info(f"[TCP] {symbol} SHORT bloqueado: funding={funding:.5f}")
+                    return {"symbol": symbol, "side": "short", "price": last_close,
+                            "sl_price": sl_price, "tp_price": tp_price,
+                            "candle_ts": candle_ts, "blocked_reason": f"funding_low|{funding:.5f}",
+                            "strategy": "tcp"}
+                logger.info(f"[TCP] ✅ {symbol} SHORT pullback entry={last_close} ema20={ema20:.4f} rsi={rsi:.1f}")
+                return {"symbol": symbol, "side": "short", "price": last_close,
+                        "sl_price": sl_price, "tp_price": tp_price,
+                        "candle_ts": candle_ts, "strategy": "tcp"}
+
+        return None
+    except Exception as e:
+        logger.warning(f"[TCP] {symbol}: {e}")
+        return None
+
+
 async def scan_all(symbols: list[dict]) -> tuple[list[dict], list[dict]]:
-    """Escanea todos los símbolos. Retorna (señales_válidas, bloqueadas_por_tendencia)."""
+    """Corre Donchian + TCP en todos los símbolos. Retorna (señales_válidas, bloqueadas)."""
     exchange = _build_exchange()
     signals  = []
     blocked  = []
     try:
         for config in symbols:
-            sig = await scan_symbol(exchange, config)
-            if sig is None:
-                continue
-            if "blocked_reason" in sig:
-                blocked.append(sig)
-            else:
-                signals.append(sig)
+            for scanner, strat in [(scan_symbol, "donchian"), (scan_symbol_tcp, "tcp")]:
+                sig = await scanner(exchange, config)
+                if sig is None:
+                    continue
+                sig.setdefault("strategy", strat)
+                if "blocked_reason" in sig:
+                    blocked.append(sig)
+                else:
+                    signals.append(sig)
     finally:
         await exchange.close()
     return signals, blocked
