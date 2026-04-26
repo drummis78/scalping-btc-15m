@@ -22,7 +22,7 @@ from bot.state import (
     update_blocked_outcome, get_position, update_position_sl,
 )
 from bot.exchange import binance_exchange
-from bot.scanner import load_symbols, scan_all
+from bot.scanner import load_symbols, load_symbols_1h, scan_all
 from bot.fundamental import fundamental_filter
 from bot.notifier import notifier
 
@@ -39,6 +39,7 @@ logger = logging.getLogger("scalping_bot")
 
 # Símbolos cargados una vez al startup
 _symbols: list[dict] = []
+_symbols_1h: list[dict] = []
 
 
 # ── Background tasks ──────────────────────────────────────────────────────────
@@ -54,8 +55,8 @@ async def _signal_scanner():
         if not _symbols:
             continue
         try:
-            logger.info(f"[SCANNER] Iniciando scan de {len(_symbols)} símbolos")
-            signals, blocked = await scan_all(_symbols)
+            logger.info(f"[SCANNER] Iniciando scan — {len(_symbols)} simbolos 15m, {len(_symbols_1h)} simbolos 1H")
+            signals, blocked = await scan_all(_symbols, _symbols_1h)
             logger.info(f"[SCANNER] {len(signals)} señal(es), {len(blocked)} bloqueada(s) por tendencia 1H")
 
             # Loguear señales bloqueadas por tendencia o funding (sin marcarlas como processed)
@@ -384,7 +385,9 @@ async def lifespan(app: FastAPI):
     await notifier.start()
 
     _symbols = load_symbols()
-    logger.info(f"[STARTUP] {len(_symbols)} símbolos activos: {[s['symbol'] for s in _symbols]}")
+    _symbols_1h = load_symbols_1h()
+    logger.info(f"[STARTUP] {len(_symbols)} simbolos 15m: {[s['symbol'] for s in _symbols]}")
+    logger.info(f"[STARTUP] {len(_symbols_1h)} simbolos 1H v2: {[s['symbol'] for s in _symbols_1h]}")
 
     discrepancies = await binance_exchange.reconcile()
     if discrepancies:
@@ -429,7 +432,122 @@ def _check_secret(x_secret: str = Header(default="", alias="X-Secret")):
 @app.get("/health")
 async def health():
     return {"status": "ok", "mode": "paper" if settings.TESTNET else "real",
-            "symbols": len(_symbols)}
+            "symbols": len(_symbols), "symbols_1h": len(_symbols_1h)}
+
+
+@app.get("/dashboard", response_class=__import__("fastapi.responses", fromlist=["HTMLResponse"]).HTMLResponse)
+async def dashboard():
+    from fastapi.responses import HTMLResponse
+    bal  = await get_paper_balance() if settings.TESTNET else await binance_exchange.get_balance()
+    pos  = [dict(p) for p in await get_all_positions()]
+    daily = await get_today_stats() or {}
+    signals = await get_signal_log(limit=40)
+    async with get_pool().acquire() as conn:
+        trades = [dict(r) for r in await conn.fetch(
+            "SELECT * FROM trades ORDER BY id DESC LIMIT 20")]
+        strat_rows = [dict(r) for r in await conn.fetch("""
+            SELECT strategy,
+                   COUNT(*) trades,
+                   SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) wins,
+                   ROUND(SUM(pnl)::numeric,2) total_pnl,
+                   SUM(CASE WHEN close_reason='tp_hit' THEN 1 ELSE 0 END) tp_hits,
+                   SUM(CASE WHEN close_reason='sl_hit' THEN 1 ELSE 0 END) sl_hits
+            FROM trades GROUP BY strategy ORDER BY strategy
+        """)]
+    mode  = "PAPER" if settings.TESTNET else "REAL"
+    pnl_d = daily.get("realized_pnl", 0)
+    pnl_class = "pos" if pnl_d >= 0 else "neg"
+
+    def badge(strat):
+        colors = {"donchian": "#00bcd4", "tcp": "#ff9800", "donchian_1h": "#00e676"}
+        c = colors.get(strat, "#aaa")
+        labels = {"donchian": "15m", "tcp": "TCP 15m", "donchian_1h": "1H v2"}
+        return f'<span style="background:{c}22;color:{c};padding:2px 7px;border-radius:4px;font-size:10px;font-weight:bold">{labels.get(strat,strat)}</span>'
+
+    pos_rows = "".join(f"""<tr>
+        <td>{badge(p.get('strategy',''))}</td>
+        <td><b>{p['symbol']}</b></td>
+        <td style="color:{'#00e676' if p['side']=='long' else '#ff5252'}">{p['side'].upper()}</td>
+        <td>${p['entry_price']:,.4f}</td>
+        <td>${p.get('sl_price') or 0:,.4f}</td>
+        <td>${p.get('tp_price') or 0:,.4f}</td>
+        <td>{p.get('leverage',3):.0f}x</td>
+        <td>{str(p.get('open_time',''))[:16]}</td>
+    </tr>""" for p in pos) or "<tr><td colspan=8 style='color:#555;text-align:center'>Sin posiciones abiertas</td></tr>"
+
+    trade_rows = "".join(f"""<tr>
+        <td>{badge(t.get('strategy',''))}</td>
+        <td><b>{t['symbol']}</b></td>
+        <td style="color:{'#00e676' if t['side']=='long' else '#ff5252'}">{t['side'].upper()}</td>
+        <td>${t['entry_price']:,.4f}</td>
+        <td>${t['close_price']:,.4f}</td>
+        <td style="color:{'#00e676' if (t['pnl'] or 0)>=0 else '#ff5252'}">${(t['pnl'] or 0):+.2f}</td>
+        <td style="color:{'#00e676' if t.get('close_reason')=='tp_hit' else '#ff5252'}">{t.get('close_reason','').replace('_',' ').upper()}</td>
+        <td>{str(t.get('close_time',''))[:16]}</td>
+    </tr>""" for t in trades) or "<tr><td colspan=8 style='color:#555;text-align:center'>Sin historial</td></tr>"
+
+    sig_rows = "".join(f"""<tr>
+        <td>{str(s.get('ts',''))[:16]}</td>
+        <td>{badge(s.get('strategy',''))}</td>
+        <td><b>{s.get('symbol','')}</b></td>
+        <td style="color:{'#00e676' if s.get('side')=='long' else '#ff5252'}">{(s.get('side') or '').upper()}</td>
+        <td>${(s.get('price') or 0):,.4f}</td>
+        <td style="color:{'#00e676' if s.get('verdict')=='executed' else '#ffa500'}">{(s.get('verdict') or '').replace('_',' ').upper()}</td>
+        <td style="font-size:10px;color:#888">{(s.get('fund_reason') or '')[:50]}</td>
+    </tr>""" for s in signals)
+
+    strat_cards = "".join(f"""
+        <div style="background:#161616;border:1px solid #222;border-radius:12px;padding:18px;min-width:200px">
+            <div style="margin-bottom:8px">{badge(r['strategy'])}</div>
+            <div style="font-size:22px;font-weight:bold;color:#00ffcc">{r['trades']}</div>
+            <div style="color:#888;font-size:11px;margin-bottom:6px">trades cerrados</div>
+            <div>WR: <b style="color:{'#00e676' if r['trades'] and r['wins']/r['trades']>0.4 else '#ffa500'}">{r['wins']/r['trades']*100:.1f}%</b> &nbsp; PnL: <b style="color:{'#00e676' if (r['total_pnl'] or 0)>=0 else '#ff5252'}">${(r['total_pnl'] or 0):+.2f}</b></div>
+            <div style="font-size:10px;color:#555;margin-top:4px">TP {r['tp_hits']} / SL {r['sl_hits']}</div>
+        </div>
+    """ for r in strat_rows if r['trades'])
+
+    html_out = f"""<!DOCTYPE html><html><head>
+    <title>Scalping Bot — Dashboard</title>
+    <meta charset="utf-8"><meta http-equiv="refresh" content="60">
+    <style>
+        *{{box-sizing:border-box}} body{{font-family:'Segoe UI',sans-serif;background:#0a0a0a;color:#e0e0e0;margin:0;padding:20px}}
+        .wrap{{max-width:1300px;margin:auto}}
+        .hdr{{display:flex;justify-content:space-between;align-items:center;background:#141414;padding:20px 28px;border-radius:14px;border:1px solid #222;margin-bottom:24px}}
+        .stats{{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:24px}}
+        .card{{background:#161616;border:1px solid #222;border-radius:12px;padding:18px 22px;flex:1;min-width:140px}}
+        .val{{font-size:24px;font-weight:bold;color:#00ffcc;margin:6px 0 2px}}
+        .lbl{{font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px}}
+        .pos{{color:#00e676}} .neg{{color:#ff5252}}
+        h2{{border-left:4px solid #00ffcc;padding-left:14px;margin:28px 0 12px;font-size:15px;color:#ccc}}
+        table{{width:100%;border-collapse:collapse;background:#111;border-radius:10px;overflow:hidden;margin-bottom:24px}}
+        th,td{{padding:11px 14px;text-align:left;border-bottom:1px solid #1a1a1a;font-size:12px}}
+        th{{background:#1a1a1a;color:#00ffcc;font-size:10px;text-transform:uppercase;letter-spacing:1px}}
+        .strats{{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:24px}}
+    </style></head><body><div class="wrap">
+    <div class="hdr">
+        <div><h1 style="margin:0;font-size:20px">SCALPING BOT <span style="color:#555;font-size:13px">{mode}</span></h1>
+        <div style="font-size:11px;color:#555;margin-top:4px">15m Donchian + TCP &nbsp;|&nbsp; <span style="color:#00e676">1H v2 Donchian</span> &nbsp;|&nbsp; {len(_symbols)} + {len(_symbols_1h)} simbolos</div></div>
+        <div style="text-align:right"><div class="lbl">Balance</div><div class="val">${bal:,.2f}</div></div>
+    </div>
+    <div class="stats">
+        <div class="card"><div class="lbl">PnL hoy</div><div class="val {pnl_class}">${pnl_d:+.2f}</div></div>
+        <div class="card"><div class="lbl">Posiciones abiertas</div><div class="val">{len(pos)}</div></div>
+        <div class="card"><div class="lbl">Trades totales</div><div class="val">{daily.get('trade_count',0)}</div></div>
+        <div class="card"><div class="lbl">Wins hoy</div><div class="val pos">{daily.get('win_count',0)}</div></div>
+    </div>
+    <h2>RENDIMIENTO POR ESTRATEGIA</h2>
+    <div class="strats">{strat_cards or '<div style="color:#555">Sin trades aun</div>'}</div>
+    <h2>POSICIONES ABIERTAS ({len(pos)})</h2>
+    <table><thead><tr><th>Estrategia</th><th>Simbolo</th><th>Lado</th><th>Entry</th><th>SL</th><th>TP</th><th>Lev</th><th>Abierto</th></tr></thead>
+    <tbody>{pos_rows}</tbody></table>
+    <h2>ULTIMOS 20 TRADES</h2>
+    <table><thead><tr><th>Estrategia</th><th>Simbolo</th><th>Lado</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Resultado</th><th>Cierre</th></tr></thead>
+    <tbody>{trade_rows}</tbody></table>
+    <h2>BITACORA DE SENALES (ultimas 40)</h2>
+    <table><thead><tr><th>Hora</th><th>Estrategia</th><th>Simbolo</th><th>Lado</th><th>Precio</th><th>Veredicto</th><th>Razon</th></tr></thead>
+    <tbody>{sig_rows}</tbody></table>
+    </div></body></html>"""
+    return HTMLResponse(html_out)
 
 
 @app.get("/api/positions")
