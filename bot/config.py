@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     BE_STOP_ENABLED:      bool  = True    # mover SL a entry cuando profit >= SL_dist
     ACTIVE_HOURS_BLOCK:   str   = "4,5,6,11"  # horas UTC bloqueadas: 04-06 + 11 (0% WR)
 
+    COOLDOWN_LOSSES:      int   = 3      # N pérdidas consecutivas activan cooldown
+    COOLDOWN_MINUTES:     int   = 60     # minutos de pausa tras la racha
+
     FUNDAMENTAL_ENABLED:       bool = True
     FUNDAMENTAL_POLL_INTERVAL: int  = 1800
     NEWSAPI_KEY:               str  = ""

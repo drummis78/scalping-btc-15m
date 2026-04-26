@@ -3,7 +3,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Request, HTTPException, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +20,7 @@ from bot.state import (
     is_replay, log_signal, get_current_dd_pct, get_peak_balance,
     ensure_daily_stats, is_blocked_logged, get_pending_blocked_signals,
     update_blocked_outcome, get_position, update_position_sl,
+    get_consecutive_losses,
 )
 from bot.exchange import binance_exchange
 from bot.scanner import load_symbols, load_symbols_1h, scan_all
@@ -116,6 +117,23 @@ async def _process_signal(sig: dict):
         await log_signal(ts, symbol, side, price, sl_price, tp_price,
                          True, "max_positions", 0.0, "skipped_max_positions", "", strategy)
         return
+
+    # Cooldown tras N pérdidas consecutivas
+    if settings.COOLDOWN_LOSSES > 0:
+        streak, last_close = await get_consecutive_losses()
+        if streak <= -settings.COOLDOWN_LOSSES and last_close:
+            try:
+                last_dt  = datetime.fromisoformat(last_close.replace("Z", "+00:00"))
+                cooldown_until = last_dt + timedelta(minutes=settings.COOLDOWN_MINUTES)
+                if datetime.now(timezone.utc) < cooldown_until:
+                    remaining = int((cooldown_until - datetime.now(timezone.utc)).total_seconds() / 60)
+                    logger.info(f"[COOLDOWN] {symbol} bloqueado — {-streak} pérdidas consecutivas, cooldown {remaining}m restantes")
+                    await log_signal(ts, symbol, side, price, sl_price, tp_price,
+                                     True, f"cooldown|{-streak}_losses_consecutivas", 0.0,
+                                     "blocked_cooldown", "", strategy)
+                    return "cooldown"
+            except Exception:
+                pass
 
     # Circuit breaker — DD global
     balance = await get_paper_balance() if settings.TESTNET else await binance_exchange.get_balance()
@@ -829,10 +847,63 @@ async def api_analytics():
                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
                    ROUND(SUM(pnl)::numeric, 2) AS total_pnl,
                    ROUND(AVG(pnl)::numeric, 2) AS avg_pnl,
+                   ROUND(AVG(CASE WHEN pnl > 0 THEN pnl END)::numeric, 2) AS avg_win,
+                   ROUND(AVG(CASE WHEN pnl <= 0 THEN pnl END)::numeric, 2) AS avg_loss,
                    SUM(CASE WHEN close_reason='tp_hit' THEN 1 ELSE 0 END) AS tp_hits,
                    SUM(CASE WHEN close_reason='sl_hit' THEN 1 ELSE 0 END) AS sl_hits
             FROM trades GROUP BY strategy ORDER BY strategy
         """)
+        # Métricas de rachas: agrupar trades consecutivos y ver distribución
+        all_trades_ordered = await conn.fetch(
+            "SELECT pnl, close_time FROM trades ORDER BY id ASC"
+        )
+        # Racha actual (últimos 20 trades)
+        streak_val, streak_last = await get_consecutive_losses()
+        # Distribución de rachas históricas
+        loss_streaks = []
+        win_streaks  = []
+        cur_streak   = 0
+        cur_sign     = None
+        for r in all_trades_ordered:
+            p = r["pnl"] or 0
+            s = 1 if p > 0 else -1
+            if cur_sign is None or s == cur_sign:
+                cur_streak += 1
+                cur_sign    = s
+            else:
+                if cur_sign == -1: loss_streaks.append(cur_streak)
+                else:              win_streaks.append(cur_streak)
+                cur_streak = 1
+                cur_sign   = s
+        if cur_sign == -1: loss_streaks.append(cur_streak)
+        elif cur_sign == 1: win_streaks.append(cur_streak)
+        streak_stats = {
+            "current":           streak_val,
+            "cooldown_threshold": settings.COOLDOWN_LOSSES,
+            "cooldown_minutes":   settings.COOLDOWN_MINUTES,
+            "max_loss_streak":   max(loss_streaks) if loss_streaks else 0,
+            "avg_loss_streak":   round(sum(loss_streaks)/len(loss_streaks), 1) if loss_streaks else 0,
+            "max_win_streak":    max(win_streaks)  if win_streaks  else 0,
+            "loss_streak_dist":  {str(i): loss_streaks.count(i) for i in sorted(set(loss_streaks))},
+        }
+    # Calcular profit factor y expectancy por estrategia
+    strategy_metrics = []
+    for r in strategy_trades:
+        t     = int(r["trades"])
+        w     = int(r["wins"])
+        l     = t - w
+        aw    = float(r["avg_win"]  or 0)
+        al    = float(r["avg_loss"] or 0)
+        wr    = w / t if t else 0
+        pf    = (aw * w) / (abs(al) * l) if al != 0 and l > 0 else None
+        exp   = round(wr * aw + (1 - wr) * al, 3) if aw and al else None
+        strategy_metrics.append({
+            **dict(r),
+            "win_rate":     round(wr * 100, 1),
+            "profit_factor": round(pf, 3) if pf else None,
+            "expectancy":    exp,
+        })
+
     return {
         "by_symbol":      [dict(r) for r in sym_rows],
         "signals_symbol": [dict(r) for r in sig_sym_rows],
@@ -843,11 +914,12 @@ async def api_analytics():
         "trend_blocked":      [dict(r) for r in trend_rows],
         "trend_summary":      dict(trend_sum) if trend_sum else {},
         "strategy_signals":   [dict(r) for r in strategy_signals],
-        "strategy_trades":    [dict(r) for r in strategy_trades],
+        "strategy_trades":    strategy_metrics,
         "conflict_blocked":   [dict(r) for r in conflict_rows],
         "conflict_summary":   dict(conflict_sum) if conflict_sum else {},
         "funding_blocked":    [dict(r) for r in funding_rows],
         "funding_summary":    dict(funding_sum) if funding_sum else {},
+        "streak_stats":       streak_stats,
     }
 
 

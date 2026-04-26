@@ -313,6 +313,26 @@ async def log_signal(ts: str, symbol: str, side: str, price: float,
              1 if fund_allow else 0, fund_reason, fund_impact, verdict, result_json, strategy)
 
 
+async def get_consecutive_losses() -> tuple[int, str | None]:
+    """Retorna (racha_actual, close_time_del_ultimo_trade).
+    Racha positiva = ganancias consecutivas, negativa = pérdidas consecutivas."""
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT pnl, close_time FROM trades ORDER BY id DESC LIMIT 20"
+        )
+    if not rows:
+        return 0, None
+    streak = 0
+    sign = 1 if (rows[0]["pnl"] or 0) > 0 else -1
+    for r in rows:
+        pnl = r["pnl"] or 0
+        if (pnl > 0 and sign == 1) or (pnl <= 0 and sign == -1):
+            streak += sign
+        else:
+            break
+    return streak, str(rows[0]["close_time"]) if rows else None
+
+
 async def get_signal_log(limit: int = 200) -> list:
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(
