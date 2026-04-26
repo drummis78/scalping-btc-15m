@@ -438,13 +438,13 @@ async def health():
 @app.get("/dashboard", response_class=__import__("fastapi.responses", fromlist=["HTMLResponse"]).HTMLResponse)
 async def dashboard():
     from fastapi.responses import HTMLResponse
-    bal  = await get_paper_balance() if settings.TESTNET else await binance_exchange.get_balance()
-    pos  = [dict(p) for p in await get_all_positions()]
+    bal   = await get_paper_balance() if settings.TESTNET else await binance_exchange.get_balance()
+    pos   = [dict(p) for p in await get_all_positions()]
     daily = await get_today_stats() or {}
-    signals = await get_signal_log(limit=40)
+    signals = await get_signal_log(limit=50)
     async with get_pool().acquire() as conn:
         trades = [dict(r) for r in await conn.fetch(
-            "SELECT * FROM trades ORDER BY id DESC LIMIT 20")]
+            "SELECT * FROM trades ORDER BY id DESC LIMIT 50")]
         strat_rows = [dict(r) for r in await conn.fetch("""
             SELECT strategy,
                    COUNT(*) trades,
@@ -454,99 +454,179 @@ async def dashboard():
                    SUM(CASE WHEN close_reason='sl_hit' THEN 1 ELSE 0 END) sl_hits
             FROM trades GROUP BY strategy ORDER BY strategy
         """)]
-    mode  = "PAPER" if settings.TESTNET else "REAL"
-    pnl_d = daily.get("realized_pnl", 0)
+
+    mode      = "PAPER" if settings.TESTNET else "REAL"
+    pnl_d     = daily.get("realized_pnl", 0)
     pnl_class = "pos" if pnl_d >= 0 else "neg"
 
+    STRATS = [
+        {"key": "donchian",   "label": "15m Donchian", "color": "#00bcd4", "sym": len(_symbols)},
+        {"key": "tcp",        "label": "TCP 15m",      "color": "#ff9800", "sym": len(_symbols)},
+        {"key": "donchian_1h","label": "1H v2",        "color": "#00e676", "sym": len(_symbols_1h)},
+    ]
+    strat_by_key = {r["strategy"]: r for r in strat_rows}
+
     def badge(strat):
-        colors = {"donchian": "#00bcd4", "tcp": "#ff9800", "donchian_1h": "#00e676"}
-        c = colors.get(strat, "#aaa")
-        labels = {"donchian": "15m", "tcp": "TCP 15m", "donchian_1h": "1H v2"}
-        return f'<span style="background:{c}22;color:{c};padding:2px 7px;border-radius:4px;font-size:10px;font-weight:bold">{labels.get(strat,strat)}</span>'
+        cfg = next((s for s in STRATS if s["key"] == strat), None)
+        c, lbl = (cfg["color"], cfg["label"]) if cfg else ("#aaa", strat)
+        return f'<span style="background:{c}22;color:{c};padding:2px 7px;border-radius:4px;font-size:10px;font-weight:bold">{lbl}</span>'
 
-    pos_rows = "".join(f"""<tr>
-        <td>{badge(p.get('strategy',''))}</td>
-        <td><b>{p['symbol']}</b></td>
-        <td style="color:{'#00e676' if p['side']=='long' else '#ff5252'}">{p['side'].upper()}</td>
-        <td>${p['entry_price']:,.4f}</td>
-        <td>${p.get('sl_price') or 0:,.4f}</td>
-        <td>${p.get('tp_price') or 0:,.4f}</td>
-        <td>{p.get('leverage',3):.0f}x</td>
-        <td>{str(p.get('open_time',''))[:16]}</td>
-    </tr>""" for p in pos) or "<tr><td colspan=8 style='color:#555;text-align:center'>Sin posiciones abiertas</td></tr>"
+    def strat_card(s):
+        r = strat_by_key.get(s["key"])
+        t  = int(r["trades"])  if r else 0
+        w  = int(r["wins"])    if r else 0
+        tp = int(r["tp_hits"]) if r else 0
+        sl = int(r["sl_hits"]) if r else 0
+        pnl = float(r["total_pnl"] or 0) if r else 0.0
+        wr  = w / t * 100 if t else 0
+        wr_color = "#00e676" if wr >= 40 else ("#ffa500" if wr >= 30 else "#ff5252")
+        pnl_color = "#00e676" if pnl >= 0 else "#ff5252"
+        c = s["color"]
+        return f"""
+        <div class="scard" data-strat="{s['key']}" style="border-top:3px solid {c}">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+                <span style="color:{c};font-weight:bold;font-size:13px">{s['label']}</span>
+                <span style="color:#555;font-size:10px">{s['sym']} simbolos</span>
+            </div>
+            <div style="display:flex;gap:20px">
+                <div><div class="sval">{t}</div><div class="slbl">trades</div></div>
+                <div><div class="sval" style="color:{wr_color}">{wr:.1f}%</div><div class="slbl">WR</div></div>
+                <div><div class="sval" style="color:{pnl_color}">${pnl:+.2f}</div><div class="slbl">PnL</div></div>
+                <div><div class="sval" style="color:#888">{tp}/{sl}</div><div class="slbl">TP/SL</div></div>
+            </div>
+        </div>"""
 
-    trade_rows = "".join(f"""<tr>
-        <td>{badge(t.get('strategy',''))}</td>
-        <td><b>{t['symbol']}</b></td>
-        <td style="color:{'#00e676' if t['side']=='long' else '#ff5252'}">{t['side'].upper()}</td>
-        <td>${t['entry_price']:,.4f}</td>
-        <td>${t['close_price']:,.4f}</td>
-        <td style="color:{'#00e676' if (t['pnl'] or 0)>=0 else '#ff5252'}">${(t['pnl'] or 0):+.2f}</td>
-        <td style="color:{'#00e676' if t.get('close_reason')=='tp_hit' else '#ff5252'}">{t.get('close_reason','').replace('_',' ').upper()}</td>
-        <td>{str(t.get('close_time',''))[:16]}</td>
-    </tr>""" for t in trades) or "<tr><td colspan=8 style='color:#555;text-align:center'>Sin historial</td></tr>"
+    strat_cards_html = "".join(strat_card(s) for s in STRATS)
 
-    sig_rows = "".join(f"""<tr>
-        <td>{str(s.get('ts',''))[:16]}</td>
-        <td>{badge(s.get('strategy',''))}</td>
-        <td><b>{s.get('symbol','')}</b></td>
-        <td style="color:{'#00e676' if s.get('side')=='long' else '#ff5252'}">{(s.get('side') or '').upper()}</td>
-        <td>${(s.get('price') or 0):,.4f}</td>
-        <td style="color:{'#00e676' if s.get('verdict')=='executed' else '#ffa500'}">{(s.get('verdict') or '').replace('_',' ').upper()}</td>
-        <td style="font-size:10px;color:#888">{(s.get('fund_reason') or '')[:50]}</td>
-    </tr>""" for s in signals)
+    def rows_pos(items):
+        if not items:
+            return "<tr><td colspan=8 style='color:#555;text-align:center;padding:20px'>Sin posiciones abiertas</td></tr>"
+        return "".join(f"""<tr data-strat="{p.get('strategy','')}">
+            <td>{badge(p.get('strategy',''))}</td>
+            <td><b>{p['symbol']}</b></td>
+            <td style="color:{'#00e676' if p['side']=='long' else '#ff5252'}">{p['side'].upper()}</td>
+            <td>${p['entry_price']:,.4f}</td>
+            <td>${p.get('sl_price') or 0:,.4f}</td>
+            <td>${p.get('tp_price') or 0:,.4f}</td>
+            <td>{p.get('leverage',3):.0f}x</td>
+            <td>{str(p.get('open_time',''))[:16]}</td>
+        </tr>""" for p in items)
 
-    strat_cards = "".join(f"""
-        <div style="background:#161616;border:1px solid #222;border-radius:12px;padding:18px;min-width:200px">
-            <div style="margin-bottom:8px">{badge(r['strategy'])}</div>
-            <div style="font-size:22px;font-weight:bold;color:#00ffcc">{r['trades']}</div>
-            <div style="color:#888;font-size:11px;margin-bottom:6px">trades cerrados</div>
-            <div>WR: <b style="color:{'#00e676' if r['trades'] and r['wins']/r['trades']>0.4 else '#ffa500'}">{r['wins']/r['trades']*100:.1f}%</b> &nbsp; PnL: <b style="color:{'#00e676' if (r['total_pnl'] or 0)>=0 else '#ff5252'}">${(r['total_pnl'] or 0):+.2f}</b></div>
-            <div style="font-size:10px;color:#555;margin-top:4px">TP {r['tp_hits']} / SL {r['sl_hits']}</div>
-        </div>
-    """ for r in strat_rows if r['trades'])
+    def rows_trades(items):
+        if not items:
+            return "<tr><td colspan=8 style='color:#555;text-align:center;padding:20px'>Sin historial</td></tr>"
+        return "".join(f"""<tr data-strat="{t.get('strategy','')}">
+            <td>{badge(t.get('strategy',''))}</td>
+            <td><b>{t['symbol']}</b></td>
+            <td style="color:{'#00e676' if t['side']=='long' else '#ff5252'}">{t['side'].upper()}</td>
+            <td>${t['entry_price']:,.4f}</td>
+            <td>${t['close_price']:,.4f}</td>
+            <td style="color:{'#00e676' if (t['pnl'] or 0)>=0 else '#ff5252'}">${(t['pnl'] or 0):+.2f}</td>
+            <td style="color:{'#00e676' if t.get('close_reason')=='tp_hit' else '#ff5252'}">{t.get('close_reason','').replace('_',' ').upper()}</td>
+            <td>{str(t.get('close_time',''))[:16]}</td>
+        </tr>""" for t in items)
+
+    def rows_signals(items):
+        return "".join(f"""<tr data-strat="{s.get('strategy','')}">
+            <td>{str(s.get('ts',''))[:16]}</td>
+            <td>{badge(s.get('strategy',''))}</td>
+            <td><b>{s.get('symbol','')}</b></td>
+            <td style="color:{'#00e676' if s.get('side')=='long' else '#ff5252'}">{(s.get('side') or '').upper()}</td>
+            <td>${(s.get('price') or 0):,.4f}</td>
+            <td style="color:{'#00e676' if s.get('verdict')=='executed' else '#ffa500'}">{(s.get('verdict') or '').replace('_',' ').upper()}</td>
+            <td style="font-size:10px;color:#888">{(s.get('fund_reason') or '')[:50]}</td>
+        </tr>""" for s in items) or "<tr><td colspan=7 style='color:#555;text-align:center;padding:20px'>Sin senales aun</td></tr>"
 
     html_out = f"""<!DOCTYPE html><html><head>
-    <title>Scalping Bot — Dashboard</title>
-    <meta charset="utf-8"><meta http-equiv="refresh" content="60">
+    <title>Scalping Bot</title>
+    <meta charset="utf-8">
     <style>
         *{{box-sizing:border-box}} body{{font-family:'Segoe UI',sans-serif;background:#0a0a0a;color:#e0e0e0;margin:0;padding:20px}}
-        .wrap{{max-width:1300px;margin:auto}}
-        .hdr{{display:flex;justify-content:space-between;align-items:center;background:#141414;padding:20px 28px;border-radius:14px;border:1px solid #222;margin-bottom:24px}}
-        .stats{{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:24px}}
-        .card{{background:#161616;border:1px solid #222;border-radius:12px;padding:18px 22px;flex:1;min-width:140px}}
-        .val{{font-size:24px;font-weight:bold;color:#00ffcc;margin:6px 0 2px}}
+        .wrap{{max-width:1400px;margin:auto}}
+        .hdr{{display:flex;justify-content:space-between;align-items:center;background:#141414;padding:18px 24px;border-radius:14px;border:1px solid #222;margin-bottom:20px}}
+        .stats{{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px}}
+        .card{{background:#161616;border:1px solid #222;border-radius:10px;padding:14px 18px;flex:1;min-width:120px}}
+        .val{{font-size:22px;font-weight:bold;color:#00ffcc;margin:4px 0 2px}}
         .lbl{{font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px}}
         .pos{{color:#00e676}} .neg{{color:#ff5252}}
-        h2{{border-left:4px solid #00ffcc;padding-left:14px;margin:28px 0 12px;font-size:15px;color:#ccc}}
-        table{{width:100%;border-collapse:collapse;background:#111;border-radius:10px;overflow:hidden;margin-bottom:24px}}
-        th,td{{padding:11px 14px;text-align:left;border-bottom:1px solid #1a1a1a;font-size:12px}}
+        h2{{border-left:3px solid #00ffcc;padding-left:12px;margin:20px 0 10px;font-size:13px;color:#aaa;text-transform:uppercase;letter-spacing:1px}}
+        table{{width:100%;border-collapse:collapse;background:#111;border-radius:10px;overflow:hidden;margin-bottom:20px}}
+        th,td{{padding:10px 13px;text-align:left;border-bottom:1px solid #1a1a1a;font-size:12px}}
         th{{background:#1a1a1a;color:#00ffcc;font-size:10px;text-transform:uppercase;letter-spacing:1px}}
-        .strats{{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:24px}}
+        .scards{{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:20px}}
+        .scard{{background:#161616;border:1px solid #222;border-radius:10px;padding:16px;flex:1;min-width:200px}}
+        .sval{{font-size:18px;font-weight:bold;color:#00ffcc}}
+        .slbl{{font-size:10px;color:#555;margin-top:2px}}
+        .tabs{{display:flex;gap:6px;margin-bottom:20px;flex-wrap:wrap}}
+        .tab{{padding:7px 16px;border-radius:8px;border:1px solid #333;background:#161616;color:#888;cursor:pointer;font-size:12px;font-weight:bold;transition:all .2s}}
+        .tab.active{{border-color:#00ffcc;color:#00ffcc;background:#00ffcc11}}
+        tr[data-strat].hidden{{display:none}}
+        .refresh-note{{font-size:10px;color:#333;text-align:right;margin-bottom:8px}}
     </style></head><body><div class="wrap">
+
     <div class="hdr">
-        <div><h1 style="margin:0;font-size:20px">SCALPING BOT <span style="color:#555;font-size:13px">{mode}</span></h1>
-        <div style="font-size:11px;color:#555;margin-top:4px">15m Donchian + TCP &nbsp;|&nbsp; <span style="color:#00e676">1H v2 Donchian</span> &nbsp;|&nbsp; {len(_symbols)} + {len(_symbols_1h)} simbolos</div></div>
-        <div style="text-align:right"><div class="lbl">Balance</div><div class="val">${bal:,.2f}</div></div>
+        <div>
+            <h1 style="margin:0;font-size:18px">SCALPING BOT <span style="color:#555;font-size:12px">{mode}</span></h1>
+            <div style="font-size:10px;color:#444;margin-top:3px">
+                <span style="color:#00bcd4">15m Donchian</span> ({len(_symbols)} sym) &nbsp;|&nbsp;
+                <span style="color:#ff9800">TCP 15m</span> &nbsp;|&nbsp;
+                <span style="color:#00e676">1H v2 Donchian</span> ({len(_symbols_1h)} sym)
+            </div>
+        </div>
+        <div style="text-align:right">
+            <div class="lbl">Balance</div>
+            <div class="val">${bal:,.2f}</div>
+        </div>
     </div>
+
     <div class="stats">
         <div class="card"><div class="lbl">PnL hoy</div><div class="val {pnl_class}">${pnl_d:+.2f}</div></div>
         <div class="card"><div class="lbl">Posiciones abiertas</div><div class="val">{len(pos)}</div></div>
-        <div class="card"><div class="lbl">Trades totales</div><div class="val">{daily.get('trade_count',0)}</div></div>
+        <div class="card"><div class="lbl">Trades hoy</div><div class="val">{daily.get('trade_count',0)}</div></div>
         <div class="card"><div class="lbl">Wins hoy</div><div class="val pos">{daily.get('win_count',0)}</div></div>
     </div>
-    <h2>RENDIMIENTO POR ESTRATEGIA</h2>
-    <div class="strats">{strat_cards or '<div style="color:#555">Sin trades aun</div>'}</div>
-    <h2>POSICIONES ABIERTAS ({len(pos)})</h2>
-    <table><thead><tr><th>Estrategia</th><th>Simbolo</th><th>Lado</th><th>Entry</th><th>SL</th><th>TP</th><th>Lev</th><th>Abierto</th></tr></thead>
-    <tbody>{pos_rows}</tbody></table>
-    <h2>ULTIMOS 20 TRADES</h2>
-    <table><thead><tr><th>Estrategia</th><th>Simbolo</th><th>Lado</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Resultado</th><th>Cierre</th></tr></thead>
-    <tbody>{trade_rows}</tbody></table>
-    <h2>BITACORA DE SENALES (ultimas 40)</h2>
-    <table><thead><tr><th>Hora</th><th>Estrategia</th><th>Simbolo</th><th>Lado</th><th>Precio</th><th>Veredicto</th><th>Razon</th></tr></thead>
-    <tbody>{sig_rows}</tbody></table>
-    </div></body></html>"""
+
+    <h2>Rendimiento por estrategia</h2>
+    <div class="scards">{strat_cards_html}</div>
+
+    <div class="tabs">
+        <button class="tab active" onclick="filterTab('all',this)">Todas</button>
+        <button class="tab" onclick="filterTab('donchian',this)" style="border-color:#00bcd444;color:#00bcd4">15m Donchian</button>
+        <button class="tab" onclick="filterTab('tcp',this)" style="border-color:#ff980044;color:#ff9800">TCP 15m</button>
+        <button class="tab" onclick="filterTab('donchian_1h',this)" style="border-color:#00e67644;color:#00e676">1H v2</button>
+    </div>
+
+    <h2>Posiciones abiertas ({len(pos)})</h2>
+    <table id="tbl-pos"><thead><tr><th>Estrategia</th><th>Simbolo</th><th>Lado</th><th>Entry</th><th>SL</th><th>TP</th><th>Lev</th><th>Abierto</th></tr></thead>
+    <tbody>{rows_pos(pos)}</tbody></table>
+
+    <h2>Ultimos 50 trades</h2>
+    <table id="tbl-trades"><thead><tr><th>Estrategia</th><th>Simbolo</th><th>Lado</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Resultado</th><th>Cierre</th></tr></thead>
+    <tbody>{rows_trades(trades)}</tbody></table>
+
+    <h2>Bitacora de senales (ultimas 50)</h2>
+    <table id="tbl-sig"><thead><tr><th>Hora</th><th>Estrategia</th><th>Simbolo</th><th>Lado</th><th>Precio</th><th>Veredicto</th><th>Razon</th></tr></thead>
+    <tbody>{rows_signals(signals)}</tbody></table>
+
+    <div class="refresh-note">Auto-refresh cada 60s</div>
+    </div>
+
+    <script>
+    let _activeTab = 'all';
+    function filterTab(strat, btn) {{
+        _activeTab = strat;
+        document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        ['tbl-pos','tbl-trades','tbl-sig'].forEach(id => {{
+            document.querySelectorAll('#'+id+' tbody tr[data-strat]').forEach(row => {{
+                if (strat === 'all' || row.dataset.strat === strat) row.classList.remove('hidden');
+                else row.classList.add('hidden');
+            }});
+        }});
+    }}
+    setTimeout(() => location.reload(), 60000);
+    </script>
+    </body></html>"""
     return HTMLResponse(html_out)
 
 
