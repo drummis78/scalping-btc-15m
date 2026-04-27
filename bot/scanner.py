@@ -445,12 +445,15 @@ async def load_top50_symbols() -> list[dict]:
         tickers = await exchange.fetch_tickers()
         rows = []
         for sym, t in tickers.items():
-            if not sym.endswith("/USDT"):
+            # Binance Futures usa "BTC/USDT:USDT" — aceptamos ambos formatos
+            if not (sym.endswith("/USDT:USDT") or sym.endswith("/USDT")):
                 continue
-            if sym in EXCLUDED:
+            # Normalizar a "BTC/USDT" para compatibilidad con fetch_ohlcv
+            normalized = sym.replace(":USDT", "")
+            if normalized in EXCLUDED:
                 continue
             qv = t.get("quoteVolume") or 0
-            rows.append({"symbol": sym, "quoteVolume": qv})
+            rows.append({"symbol": normalized, "quoteVolume": qv})
         rows.sort(key=lambda x: x["quoteVolume"], reverse=True)
         top50 = [{"symbol": r["symbol"]} for r in rows[:TOP_N]]
         logger.info(f"[SCANNER] {len(top50)} top símbolos cargados: {[s['symbol'] for s in top50[:5]]}...")
