@@ -15,12 +15,9 @@ from bot.config import settings
 
 logger = logging.getLogger("scalping_bot.scanner")
 
-# ── Filtros de universo (CSV backtest) ────────────────────────────────────────
-MIN_RETURN_PCT = 0.0    # cualquier retorno positivo
-MIN_WIN_RATE   = 42.0   # con 2.33:1 RR el breakeven es 30% WR
-MIN_TRADES     = 50
-TOP_N          = 50
-EXCLUDED       = {"SHIB/USDT", "MATIC/USDT", "RNDR/USDT"}
+# ── Universo de trading ───────────────────────────────────────────────────────
+TOP_N    = 50
+EXCLUDED = {"SHIB/USDT", "MATIC/USDT", "RNDR/USDT"}
 
 # ── Parámetros fijos de estrategia ────────────────────────────────────────────
 LOOKBACK      = 30      # Donchian channel period (15m) — canal más largo, menos falsos breakouts
@@ -53,24 +50,6 @@ D1H_TOP_N    = 50
 D1H_MIN_WR   = 30.0   # backtest 1H: breakeven real ~33%, usamos 30% para incluir top 50
 
 
-def load_symbols() -> list[dict]:
-    try:
-        df = pd.read_csv(settings.SYMBOLS_CSV)
-        df = df[
-            (df["return_pct"] > MIN_RETURN_PCT) &
-            (df["win_rate"]   > MIN_WIN_RATE)   &
-            (df["trades"]     >= MIN_TRADES)    &
-            (~df["symbol"].isin(EXCLUDED))
-        ]
-        df = df.sort_values("return_pct", ascending=False).head(TOP_N)
-        records = df.to_dict("records")
-        logger.info(f"[SCANNER] {len(records)} símbolos cargados del CSV")
-        return records
-    except Exception as e:
-        logger.error(f"[SCANNER] Error cargando CSV: {e}")
-        return []
-
-
 def _build_exchange() -> ccxt_async.binance:
     return ccxt_async.binance({
         "apiKey":          settings.BINANCE_API_KEY or None,
@@ -94,6 +73,41 @@ async def _get_1h_trend(exchange: ccxt_async.binance, symbol: str) -> Optional[s
         return "up" if ema20 > ema50 else "down"
     except Exception:
         return None
+
+
+async def _get_regime_1h(exchange: ccxt_async.binance, symbol: str) -> str:
+    """
+    Detecta régimen de mercado en 1H usando Choppiness Index.
+    Retorna 'lateral' si CHOP >= threshold, 'trending' si CHOP < threshold, 'unknown' si falla.
+    CHOP(n) = 100 * log10(sum(TR,n) / (HH-LL,n)) / log10(n)
+    """
+    if not settings.REGIME_FILTER_ENABLED:
+        return "trending"
+    try:
+        import math
+        n = settings.REGIME_CHOP_LEN
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe="1h", limit=n + 5)
+        if len(ohlcv) < n + 2:
+            return "unknown"
+        highs  = pd.Series([c[2] for c in ohlcv])
+        lows   = pd.Series([c[3] for c in ohlcv])
+        closes = pd.Series([c[4] for c in ohlcv])
+        tr     = pd.concat([
+            highs - lows,
+            (highs - closes.shift()).abs(),
+            (lows  - closes.shift()).abs(),
+        ], axis=1).max(axis=1)
+        atr_sum = float(tr.iloc[-n:].sum())
+        hh      = float(highs.iloc[-n:].max())
+        ll      = float(lows.iloc[-n:].min())
+        if hh == ll or atr_sum <= 0:
+            return "unknown"
+        chop = 100 * math.log10(atr_sum / (hh - ll)) / math.log10(n)
+        regime = "lateral" if chop >= settings.REGIME_CHOP_THRESHOLD else "trending"
+        logger.debug(f"[REGIME] {symbol} CHOP1H={chop:.1f} → {regime}")
+        return regime
+    except Exception:
+        return "unknown"
 
 
 async def _get_funding_rate(exchange: ccxt_async.binance, symbol: str) -> Optional[float]:
@@ -120,7 +134,9 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
         return None
 
     try:
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe="15m", limit=LOOKBACK + 20)
+        atrpct_len = settings.ATRPCT_FILTER_LEN if settings.ATRPCT_FILTER_ENABLED else 0
+        fetch_limit = max(LOOKBACK + 20, atrpct_len + 20)
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe="15m", limit=fetch_limit)
         if len(ohlcv) < LOOKBACK + 2:
             return None
 
@@ -132,6 +148,18 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
         if not atr_col or pd.isna(df[atr_col[0]].iloc[-1]):
             return None
         atr = float(df[atr_col[0]].iloc[-1])
+
+        # ATR Percentile filter: solo operar cuando volatilidad está en percentil alto
+        if settings.ATRPCT_FILTER_ENABLED:
+            n = settings.ATRPCT_FILTER_LEN
+            atr_series = df[atr_col[0]]
+            atr_lo = atr_series.rolling(n).min()
+            atr_hi = atr_series.rolling(n).max()
+            atr_pct = (atr_series - atr_lo) / (atr_hi - atr_lo + 1e-10) * 100
+            cur_pct = float(atr_pct.iloc[-2])
+            if pd.isna(cur_pct) or cur_pct < settings.ATRPCT_FILTER_THRESHOLD:
+                logger.debug(f"[ATRPCT] {symbol} skip: percentil={cur_pct:.1f} < {settings.ATRPCT_FILTER_THRESHOLD}")
+                return None
 
         # Donchian con shift(1): el canal no incluye la vela actual
         df["upper"]   = df["high"].shift(1).rolling(window=LOOKBACK).max()
@@ -173,6 +201,14 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
             sl_price = round(last_close - atr * SL_MULT, 6)
             tp_price = round(last_close + atr * TP_MULT, 6)
 
+            regime = await _get_regime_1h(exchange, symbol)
+            if regime == "lateral":
+                logger.info(f"[SCANNER] {symbol} LONG bloqueado: régimen lateral 1H")
+                return {
+                    "symbol": symbol, "side": "long", "price": last_close,
+                    "sl_price": sl_price, "tp_price": tp_price,
+                    "candle_ts": candle_ts, "blocked_reason": "regime_lateral",
+                }
             trend = await _get_1h_trend(exchange, symbol)
             if trend == "down":
                 logger.info(f"[SCANNER] {symbol} LONG bloqueado: 1H bajista")
@@ -204,6 +240,14 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
             sl_price = round(last_close + atr * SL_MULT, 6)
             tp_price = round(last_close - atr * TP_MULT, 6)
 
+            regime = await _get_regime_1h(exchange, symbol)
+            if regime == "lateral":
+                logger.info(f"[SCANNER] {symbol} SHORT bloqueado: régimen lateral 1H")
+                return {
+                    "symbol": symbol, "side": "short", "price": last_close,
+                    "sl_price": sl_price, "tp_price": tp_price,
+                    "candle_ts": candle_ts, "blocked_reason": "regime_lateral",
+                }
             trend = await _get_1h_trend(exchange, symbol)
             if trend == "up":
                 logger.info(f"[SCANNER] {symbol} SHORT bloqueado: 1H alcista")
@@ -251,7 +295,9 @@ async def scan_symbol_tcp(exchange: ccxt_async.binance, config: dict) -> Optiona
     if BLOCKED_HOURS and now_hour in BLOCKED_HOURS:
         return None
     try:
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe="15m", limit=65)
+        atrpct_len = settings.ATRPCT_FILTER_LEN if settings.ATRPCT_FILTER_ENABLED else 0
+        fetch_limit = max(65, atrpct_len + 20)
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe="15m", limit=fetch_limit)
         if len(ohlcv) < 55:
             return None
 
@@ -262,6 +308,18 @@ async def scan_symbol_tcp(exchange: ccxt_async.binance, config: dict) -> Optiona
         if not atr_col or pd.isna(df[atr_col[0]].iloc[-1]):
             return None
         atr = float(df[atr_col[0]].iloc[-1])
+
+        # ATR Percentile filter
+        if settings.ATRPCT_FILTER_ENABLED:
+            n = settings.ATRPCT_FILTER_LEN
+            atr_series = df[atr_col[0]]
+            atr_lo = atr_series.rolling(n).min()
+            atr_hi = atr_series.rolling(n).max()
+            atr_pct = (atr_series - atr_lo) / (atr_hi - atr_lo + 1e-10) * 100
+            cur_pct = float(atr_pct.iloc[-2])
+            if pd.isna(cur_pct) or cur_pct < settings.ATRPCT_FILTER_THRESHOLD:
+                logger.debug(f"[ATRPCT/TCP] {symbol} skip: percentil={cur_pct:.1f} < {settings.ATRPCT_FILTER_THRESHOLD}")
+                return None
 
         df.ta.rsi(length=14, append=True)
         rsi_col = [c for c in df.columns if c.startswith("RSI")]
@@ -294,6 +352,13 @@ async def scan_symbol_tcp(exchange: ccxt_async.binance, config: dict) -> Optiona
             if touched and rsi_ok and green and vol_ok:
                 sl_price = round(last_close - atr * TCP_SL_MULT, 6)
                 tp_price = round(last_close + atr * TCP_TP_MULT, 6)
+                regime = await _get_regime_1h(exchange, symbol)
+                if regime == "lateral":
+                    logger.info(f"[TCP] {symbol} LONG bloqueado: régimen lateral 1H")
+                    return {"symbol": symbol, "side": "long", "price": last_close,
+                            "sl_price": sl_price, "tp_price": tp_price,
+                            "candle_ts": candle_ts, "blocked_reason": "regime_lateral",
+                            "strategy": "tcp"}
                 trend = await _get_1h_trend(exchange, symbol)
                 if trend == "down":
                     logger.info(f"[TCP] {symbol} LONG bloqueado: 1H bajista")
@@ -321,6 +386,13 @@ async def scan_symbol_tcp(exchange: ccxt_async.binance, config: dict) -> Optiona
             if touched and rsi_ok and red and vol_ok:
                 sl_price = round(last_close + atr * TCP_SL_MULT, 6)
                 tp_price = round(last_close - atr * TCP_TP_MULT, 6)
+                regime = await _get_regime_1h(exchange, symbol)
+                if regime == "lateral":
+                    logger.info(f"[TCP] {symbol} SHORT bloqueado: régimen lateral 1H")
+                    return {"symbol": symbol, "side": "short", "price": last_close,
+                            "sl_price": sl_price, "tp_price": tp_price,
+                            "candle_ts": candle_ts, "blocked_reason": "regime_lateral",
+                            "strategy": "tcp"}
                 trend = await _get_1h_trend(exchange, symbol)
                 if trend == "up":
                     logger.info(f"[TCP] {symbol} SHORT bloqueado: 1H alcista")
@@ -362,7 +434,32 @@ SYMBOLS_1H_V2 = [
 
 
 def load_symbols_1h() -> list[dict]:
+    """Fallback sync — en startup se usa load_top50_symbols() async."""
     return [{"symbol": s} for s in SYMBOLS_1H_V2]
+
+
+async def load_top50_symbols() -> list[dict]:
+    """Top 50 futuros perpetuos USDT de Binance, ordenados por volumen 24h."""
+    exchange = _build_exchange()
+    try:
+        tickers = await exchange.fetch_tickers()
+        rows = []
+        for sym, t in tickers.items():
+            if not sym.endswith("/USDT"):
+                continue
+            if sym in EXCLUDED:
+                continue
+            qv = t.get("quoteVolume") or 0
+            rows.append({"symbol": sym, "quoteVolume": qv})
+        rows.sort(key=lambda x: x["quoteVolume"], reverse=True)
+        top50 = [{"symbol": r["symbol"]} for r in rows[:TOP_N]]
+        logger.info(f"[SCANNER] {len(top50)} top símbolos cargados: {[s['symbol'] for s in top50[:5]]}...")
+        return top50
+    except Exception as e:
+        logger.error(f"[SCANNER] Error cargando top50 de Binance: {e} — usando fallback")
+        return [{"symbol": s} for s in SYMBOLS_1H_V2]
+    finally:
+        await exchange.close()
 
 
 async def scan_symbol_donchian_1h(exchange: ccxt_async.binance, config: dict) -> Optional[dict]:
@@ -444,33 +541,39 @@ async def scan_symbol_donchian_1h(exchange: ccxt_async.binance, config: dict) ->
 
 
 async def scan_all(symbols: list[dict], symbols_1h: list[dict] = None) -> tuple[list[dict], list[dict]]:
-    """Corre Donchian 15m + TCP + Donchian 1H v2. Retorna (senales_validas, bloqueadas)."""
+    """Corre Donchian 15m + TCP + Donchian 1H v2 en paralelo. Retorna (senales_validas, bloqueadas)."""
+    import asyncio
     exchange = _build_exchange()
-    signals  = []
-    blocked  = []
-    try:
-        # 15m strategies
-        for config in symbols:
-            for scanner, strat in [(scan_symbol, "donchian"), (scan_symbol_tcp, "tcp")]:
-                sig = await scanner(exchange, config)
-                if sig is None:
-                    continue
-                sig.setdefault("strategy", strat)
-                if "blocked_reason" in sig:
-                    blocked.append(sig)
-                else:
-                    signals.append(sig)
+    signals: list[dict] = []
+    blocked: list[dict] = []
+    # 10 concurrent: bien dentro de límite Binance (1200 req/min). ccxt enableRateLimit también regula.
+    sem = asyncio.Semaphore(10)
 
-        # 1H v2 strategy
-        for config in (symbols_1h or []):
-            sig = await scan_symbol_donchian_1h(exchange, config)
+    async def _scan_one(config: dict, scanner, strat: str) -> None:
+        async with sem:
+            try:
+                sig = await scanner(exchange, config)
+            except Exception as e:
+                logger.warning(f"[SCAN_ALL] {config.get('symbol')} {strat}: {e}")
+                return
             if sig is None:
-                continue
-            sig.setdefault("strategy", "donchian_1h")
+                return
+            sig.setdefault("strategy", strat)
             if "blocked_reason" in sig:
                 blocked.append(sig)
             else:
                 signals.append(sig)
+
+    try:
+        tasks = []
+        for config in symbols:
+            tasks.append(_scan_one(config, scan_symbol, "donchian"))
+            tasks.append(_scan_one(config, scan_symbol_tcp, "tcp"))
+        for config in (symbols_1h or []):
+            tasks.append(_scan_one(config, scan_symbol_donchian_1h, "donchian_1h"))
+
+        await asyncio.gather(*tasks)
     finally:
         await exchange.close()
+
     return signals, blocked

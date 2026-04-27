@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     COOLDOWN_LOSSES:      int   = 3      # N pérdidas consecutivas activan cooldown
     COOLDOWN_MINUTES:     int   = 60     # minutos de pausa tras la racha
 
+    REGIME_FILTER_ENABLED: bool  = True   # bloquea entradas en mercado lateral
+    REGIME_CHOP_THRESHOLD: float = 61.8   # CHOP >= threshold = lateral = no operar
+    REGIME_CHOP_LEN:       int   = 14     # períodos CHOP en 1H
+
+    ATRPCT_FILTER_ENABLED:    bool  = True   # solo operar cuando ATR está en percentil alto
+    ATRPCT_FILTER_THRESHOLD:  float = 60.0   # percentil mínimo (0-100)
+    ATRPCT_FILTER_LEN:        int   = 100    # ventana rolling para min/max ATR
+
     FUNDAMENTAL_ENABLED:       bool = True
     FUNDAMENTAL_POLL_INTERVAL: int  = 1800
     NEWSAPI_KEY:               str  = ""

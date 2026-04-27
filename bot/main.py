@@ -23,7 +23,7 @@ from bot.state import (
     get_consecutive_losses,
 )
 from bot.exchange import binance_exchange
-from bot.scanner import load_symbols, load_symbols_1h, scan_all
+from bot.scanner import load_top50_symbols, load_symbols_1h, scan_all
 from bot.fundamental import fundamental_filter
 from bot.notifier import notifier
 
@@ -402,10 +402,11 @@ async def lifespan(app: FastAPI):
     notifier.exchange = binance_exchange
     await notifier.start()
 
-    _symbols = load_symbols()
+    top50 = await load_top50_symbols()
+    _symbols = top50
     _symbols_1h = load_symbols_1h()
-    logger.info(f"[STARTUP] {len(_symbols)} simbolos 15m: {[s['symbol'] for s in _symbols]}")
-    logger.info(f"[STARTUP] {len(_symbols_1h)} simbolos 1H v2: {[s['symbol'] for s in _symbols_1h]}")
+    logger.info(f"[STARTUP] {len(_symbols)} símbolos 15m top50: {[s['symbol'] for s in _symbols[:5]]}...")
+    logger.info(f"[STARTUP] {len(_symbols_1h)} símbolos 1H v2: {[s['symbol'] for s in _symbols_1h[:5]]}...")
 
     discrepancies = await binance_exchange.reconcile()
     if discrepancies:
