@@ -273,14 +273,14 @@ async def _position_monitor():
                             f"💰 PnL: `{'+'if pnl>=0 else ''}${pnl:.2f}`"
                         )
 
-                # BE Stop: mover SL a entry cuando profit >= SL_dist (una sola vez)
-                elif settings.BE_STOP_ENABLED and sl and not pos.get("be_set"):
-                    entry   = pos["entry_price"]
-                    sl_dist = abs(entry - sl)
-                    if sl_dist > 0:
+                # BE Stop: mover SL a entry+fees cuando precio llega al 50% del TP (una sola vez)
+                elif settings.BE_STOP_ENABLED and sl and tp and not pos.get("be_set"):
+                    entry    = pos["entry_price"]
+                    tp_dist  = abs(tp - entry)
+                    if tp_dist > 0:
                         be_triggered = (
-                            (side == "long"  and price >= entry + sl_dist) or
-                            (side == "short" and price <= entry - sl_dist)
+                            (side == "long"  and price >= entry + tp_dist * 0.5) or
+                            (side == "short" and price <= entry - tp_dist * 0.5)
                         )
                         if be_triggered:
                             fee_rt   = settings.COMMISSIONS.get("binance", 0.0004) * 2
