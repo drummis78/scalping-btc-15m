@@ -459,7 +459,10 @@ async def load_top50_symbols() -> list[dict]:
         logger.error(f"[SCANNER] Error cargando top50 de Binance: {e} — usando fallback")
         return [{"symbol": s} for s in SYMBOLS_1H_V2]
     finally:
-        await exchange.close()
+        try:
+            await exchange.close()
+        except Exception:
+            pass
 
 
 async def scan_symbol_donchian_1h(exchange: ccxt_async.binance, config: dict) -> Optional[dict]:

@@ -386,7 +386,7 @@ async def _trend_outcome_evaluator():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _symbols
+    global _symbols, _symbols_1h
     db_url = settings.DATABASE_URL
     masked = db_url[:30] + "..." if len(db_url) > 30 else repr(db_url)
     logger.info(f"[STARTUP] DATABASE_URL = {masked}")
