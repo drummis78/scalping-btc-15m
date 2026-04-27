@@ -103,17 +103,23 @@ async def _process_signal(sig: dict):
         logger.debug(f"[REPLAY] {symbol} {side} candle={candle_ts}")
         return
 
-    # Posición ya abierta para este símbolo/lado — loguear para análisis posterior
-    if await get_position("binance", symbol, side):
+    # Posición ya abierta para esta estrategia en este símbolo/lado
+    if await get_position("binance", symbol, side, strategy):
         logger.debug(f"[SKIP] {symbol} {side} — posición ya abierta ({strategy})")
         await log_signal(ts, symbol, side, price, sl_price, tp_price,
                          True, f"conflict|pos_abierta|{candle_ts}", 0.0, "blocked_conflict",
                          json.dumps({"outcome": "pending"}), strategy)
         return
 
-    # Max posiciones
-    if await count_positions() >= settings.MAX_POSITIONS:
-        logger.info(f"[SKIP] {symbol} {side} — max_positions={settings.MAX_POSITIONS}")
+    # Max posiciones por grupo de estrategia
+    if strategy == "donchian_1h":
+        n_pos = await count_positions(strategies=["donchian_1h"])
+        max_pos = settings.MAX_POSITIONS_1H
+    else:
+        n_pos = await count_positions(strategies=["donchian", "tcp"])
+        max_pos = settings.MAX_POSITIONS
+    if n_pos >= max_pos:
+        logger.info(f"[SKIP] {symbol} {side} — max_positions={max_pos} ({strategy})")
         await log_signal(ts, symbol, side, price, sl_price, tp_price,
                          True, "max_positions", 0.0, "skipped_max_positions", "", strategy)
         return
@@ -209,8 +215,9 @@ async def _process_signal(sig: dict):
         tp_str  = f"`${tp_price:,.4f}`"  if tp_price  else "`—`"
         fund_str = f"Score IA: `{_fund_impact:.1f}`" if _fund_reason else "IA: desactivado"
         mode_str = "PAPER" if settings.TESTNET else "REAL"
+        strat_label = "1H Donchian" if strategy == "donchian_1h" else "TCP 15m" if strategy == "tcp" else "15m Donchian"
         await notifier.notify(
-            f"🎯 *[Scalping 15m] {side.upper()}* `{symbol}`\n"
+            f"🎯 *[{strat_label}] {side.upper()}* `{symbol}`\n"
             f"📍 Entrada: `${price:,.4f}`\n"
             f"🛑 Stop Loss: {sl_str}\n"
             f"✅ Take Profit: {tp_str}\n"
@@ -242,6 +249,7 @@ async def _position_monitor():
             for pos in positions:
                 symbol = pos["symbol"]
                 side   = pos["side"]
+                strat  = pos.get("strategy", "donchian")
                 price  = prices.get(symbol)
                 if price is None:
                     continue
@@ -261,13 +269,15 @@ async def _position_monitor():
                 if sl_hit or tp_hit:
                     reason      = "tp_hit" if tp_hit else "sl_hit"
                     close_price = (tp if tp_hit else sl)
-                    result = await binance_exchange.close_position(symbol, side, close_price, reason)
+                    result = await binance_exchange.close_position(symbol, side, close_price, reason,
+                                                                   strategy=strat)
                     if result["status"] == "success":
                         pnl  = result.get("pnl", 0)
                         icon = "✅" if tp_hit else "🛑"
                         label = "TP ALCANZADO" if tp_hit else "SL TOCADO"
+                        strat_label = "1H Donchian" if strat == "donchian_1h" else "TCP 15m" if strat == "tcp" else "15m Donchian"
                         await notifier.notify(
-                            f"{icon} *[Scalping 15m] {label}*\n"
+                            f"{icon} *[{strat_label}] {label}*\n"
                             f"`{side.upper()}` `{symbol}`\n"
                             f"📍 Entry: `${pos['entry_price']:,.4f}` → Exit: `${close_price:,.4f}`\n"
                             f"💰 PnL: `{'+'if pnl>=0 else ''}${pnl:.2f}`"
@@ -283,11 +293,12 @@ async def _position_monitor():
                             (side == "short" and price <= entry - tp_dist * 0.5)
                         )
                         if be_triggered:
-                            fee_rt   = settings.COMMISSIONS.get("binance", 0.0004) * 2
+                            fee_rt   = 0.0004 * 2
                             be_price = entry * (1 + fee_rt) if side == "long" else entry * (1 - fee_rt)
                             be_price = round(be_price, 6)
-                            await update_position_sl("binance", symbol, side, be_price, be_set=True)
-                            logger.info(f"[BE-STOP] {symbol} {side} SL → {be_price:.6f} (entry+fees)")
+                            await update_position_sl("binance", symbol, side, be_price,
+                                                     be_set=True, strategy=strat)
+                            logger.info(f"[BE-STOP] {symbol} {side} ({strat}) SL → {be_price:.6f} (entry+fees)")
                             await notifier.notify(
                                 f"🔒 *BE-STOP* `{side.upper()}` `{symbol}`\n"
                                 f"Precio: `${price:,.4f}` | SL movido a `${be_price:,.4f}` (entry+fees)"

@@ -40,7 +40,7 @@ async def init_db():
                 open_time   TEXT,
                 strategy    TEXT DEFAULT 'donchian',
                 be_set      BOOLEAN DEFAULT FALSE,
-                PRIMARY KEY (exchange, symbol, side)
+                PRIMARY KEY (exchange, symbol, side, strategy)
             )
         """)
         await conn.execute("""
@@ -97,6 +97,20 @@ async def init_db():
         await conn.execute(
             "ALTER TABLE positions ADD COLUMN IF NOT EXISTS be_set BOOLEAN DEFAULT FALSE"
         )
+        # Migración PK: ampliar a (exchange, symbol, side, strategy) para independencia entre bots
+        has_strategy_in_pk = await conn.fetchval("""
+            SELECT COUNT(*) > 0
+            FROM pg_constraint c
+            JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+            WHERE c.conrelid = 'positions'::regclass
+            AND c.contype = 'p'
+            AND a.attname = 'strategy'
+        """)
+        if not has_strategy_in_pk:
+            await conn.execute("ALTER TABLE positions DROP CONSTRAINT IF EXISTS positions_pkey")
+            await conn.execute(
+                "ALTER TABLE positions ADD PRIMARY KEY (exchange, symbol, side, strategy)"
+            )
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_stats (
                 date          TEXT PRIMARY KEY,
@@ -139,12 +153,19 @@ async def is_replay(symbol: str, side: str, candle_ts: str, strategy: str = "don
 
 # ── Positions ─────────────────────────────────────────────────────────────────
 
-async def get_position(exchange: str, symbol: str, side: str) -> Optional[dict]:
+async def get_position(exchange: str, symbol: str, side: str,
+                       strategy: str = None) -> Optional[dict]:
     async with get_pool().acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT * FROM positions WHERE exchange=$1 AND symbol=$2 AND side=$3",
-            exchange, symbol, side
-        )
+        if strategy:
+            row = await conn.fetchrow(
+                "SELECT * FROM positions WHERE exchange=$1 AND symbol=$2 AND side=$3 AND strategy=$4",
+                exchange, symbol, side, strategy
+            )
+        else:
+            row = await conn.fetchrow(
+                "SELECT * FROM positions WHERE exchange=$1 AND symbol=$2 AND side=$3 LIMIT 1",
+                exchange, symbol, side
+            )
     return dict(row) if row else None
 
 
@@ -154,8 +175,13 @@ async def get_all_positions() -> list[dict]:
     return [dict(r) for r in rows]
 
 
-async def count_positions() -> int:
+async def count_positions(strategies: list = None) -> int:
     async with get_pool().acquire() as conn:
+        if strategies:
+            return await conn.fetchval(
+                "SELECT COUNT(*) FROM positions WHERE strategy = ANY($1::text[])",
+                strategies
+            ) or 0
         return await conn.fetchval("SELECT COUNT(*) FROM positions") or 0
 
 
@@ -166,22 +192,23 @@ async def save_position(exchange: str, symbol: str, side: str, entry_price: floa
     async with get_pool().acquire() as conn:
         await conn.execute("""
             INSERT INTO positions VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-            ON CONFLICT (exchange, symbol, side) DO UPDATE SET
+            ON CONFLICT (exchange, symbol, side, strategy) DO UPDATE SET
                 entry_price=$4, qty=$5, leverage=$6, sl_price=$7, tp_price=$8,
-                sl_order_id=$9, tp_order_id=$10, open_time=$11, strategy=$12
+                sl_order_id=$9, tp_order_id=$10, open_time=$11
         """, exchange, symbol, side, entry_price, qty, leverage,
              sl_price, tp_price, sl_order_id, tp_order_id,
              datetime.now(timezone.utc).isoformat(), strategy)
 
 
 async def remove_position(exchange: str, symbol: str, side: str,
-                          exit_price: float, close_reason: str = "") -> float:
-    pos = await get_position(exchange, symbol, side)
+                          exit_price: float, close_reason: str = "",
+                          strategy: str = None) -> float:
+    pos = await get_position(exchange, symbol, side, strategy)
     if not pos:
         return 0.0
     sign    = 1 if side == "long" else -1
     pnl_usd = (exit_price - pos["entry_price"]) * sign * pos["qty"] * pos["leverage"]
-    strategy = pos.get("strategy") or "donchian"
+    strat   = pos.get("strategy") or "donchian"
     async with get_pool().acquire() as conn:
         await conn.execute("""
             INSERT INTO trades
@@ -190,21 +217,30 @@ async def remove_position(exchange: str, symbol: str, side: str,
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
         """, exchange, symbol, side, pos["entry_price"], exit_price, pos["qty"],
              pos["leverage"], pnl_usd, close_reason, pos["open_time"],
-             datetime.now(timezone.utc).isoformat(), strategy)
+             datetime.now(timezone.utc).isoformat(), strat)
         await conn.execute(
-            "DELETE FROM positions WHERE exchange=$1 AND symbol=$2 AND side=$3",
-            exchange, symbol, side
+            "DELETE FROM positions WHERE exchange=$1 AND symbol=$2 AND side=$3 AND strategy=$4",
+            exchange, symbol, side, strat
         )
     return pnl_usd
 
 
 async def update_position_sl(exchange: str, symbol: str, side: str,
-                              sl_price: float, be_set: bool = False):
+                              sl_price: float, be_set: bool = False,
+                              strategy: str = None):
     async with get_pool().acquire() as conn:
-        await conn.execute(
-            "UPDATE positions SET sl_price=$1, be_set=$2 WHERE exchange=$3 AND symbol=$4 AND side=$5",
-            sl_price, be_set, exchange, symbol, side
-        )
+        if strategy:
+            await conn.execute(
+                "UPDATE positions SET sl_price=$1, be_set=$2 "
+                "WHERE exchange=$3 AND symbol=$4 AND side=$5 AND strategy=$6",
+                sl_price, be_set, exchange, symbol, side, strategy
+            )
+        else:
+            await conn.execute(
+                "UPDATE positions SET sl_price=$1, be_set=$2 "
+                "WHERE exchange=$3 AND symbol=$4 AND side=$5",
+                sl_price, be_set, exchange, symbol, side
+            )
 
 
 # ── Paper balance ─────────────────────────────────────────────────────────────

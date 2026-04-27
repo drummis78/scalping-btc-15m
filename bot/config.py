@@ -17,7 +17,8 @@ class Settings(BaseSettings):
     MAX_DAILY_LOSS_PCT:   float = 3.0
     TARGET_DAILY_PCT:     float = 1.0
     PAPER_BALANCE:        float = 1000.0
-    MAX_POSITIONS:        int   = 10
+    MAX_POSITIONS:        int   = 10   # límite para estrategias 15m (donchian + tcp)
+    MAX_POSITIONS_1H:     int   = 5    # límite independiente para donchian_1h
     RISK_PER_TRADE:       float = 0.015   # 1.5% equity por trade
 
     BE_STOP_ENABLED:      bool  = True    # mover SL a entry cuando profit >= SL_dist

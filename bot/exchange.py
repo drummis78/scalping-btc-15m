@@ -14,7 +14,7 @@ import ccxt.async_support as ccxt_async
 from bot.config import settings
 from bot.state import (
     get_position, get_all_positions, save_position, remove_position,
-    get_paper_balance, save_paper_balance, add_daily_pnl,
+    get_paper_balance, save_paper_balance, add_daily_pnl, count_positions,
 )
 
 logger = logging.getLogger("scalping_bot.exchange")
@@ -42,8 +42,8 @@ class BinanceExchange:
     def __init__(self):
         self._lock: dict[str, asyncio.Lock] = {}
 
-    def _get_lock(self, symbol: str, side: str) -> asyncio.Lock:
-        key = f"{symbol}:{side}"
+    def _get_lock(self, symbol: str, side: str, strategy: str = "") -> asyncio.Lock:
+        key = f"{symbol}:{side}:{strategy}"
         if key not in self._lock:
             self._lock[key] = asyncio.Lock()
         return self._lock[key]
@@ -95,15 +95,20 @@ class BinanceExchange:
                             leverage: float, fund_reduce: bool = False,
                             fund_boost: bool = False,
                             strategy: str = "donchian") -> dict:
-        async with self._get_lock(symbol, side):
-            existing = await get_position(EXCHANGE_NAME, symbol, side)
+        async with self._get_lock(symbol, side, strategy):
+            existing = await get_position(EXCHANGE_NAME, symbol, side, strategy)
             if existing:
                 return {"status": "skipped", "reason": "already_open",
                         "symbol": symbol, "side": side}
 
             balance = await self.get_balance()
-            open_count = len(await get_all_positions())
-            if open_count >= settings.MAX_POSITIONS:
+            if strategy == "donchian_1h":
+                open_count = await count_positions(strategies=["donchian_1h"])
+                max_pos    = settings.MAX_POSITIONS_1H
+            else:
+                open_count = await count_positions(strategies=["donchian", "tcp"])
+                max_pos    = settings.MAX_POSITIONS
+            if open_count >= max_pos:
                 return {"status": "skipped", "reason": "max_positions",
                         "symbol": symbol, "side": side}
 
@@ -201,9 +206,10 @@ class BinanceExchange:
     # ── Close position ────────────────────────────────────────────────────────
 
     async def close_position(self, symbol: str, side: str,
-                             price: float, close_reason: str = "") -> dict:
-        async with self._get_lock(symbol, side):
-            pos = await get_position(EXCHANGE_NAME, symbol, side)
+                             price: float, close_reason: str = "",
+                             strategy: str = None) -> dict:
+        async with self._get_lock(symbol, side, strategy or ""):
+            pos = await get_position(EXCHANGE_NAME, symbol, side, strategy)
             if not pos:
                 return {"status": "skipped", "reason": "not_found",
                         "symbol": symbol, "side": side}
@@ -217,7 +223,8 @@ class BinanceExchange:
     async def _paper_close(self, pos: dict, price: float, close_reason: str) -> dict:
         if price <= 0:
             price = pos["entry_price"]
-        pnl = await remove_position(EXCHANGE_NAME, pos["symbol"], pos["side"], price, close_reason)
+        pnl = await remove_position(EXCHANGE_NAME, pos["symbol"], pos["side"], price, close_reason,
+                                    strategy=pos.get("strategy"))
         commission = price * pos["qty"] * COMMISSIONS
         margin     = pos["entry_price"] * pos["qty"] / pos["leverage"]
         balance    = await get_paper_balance()
@@ -251,7 +258,8 @@ class BinanceExchange:
                         "newClientOrderId": client_id}
             )
             fill_price = float(order.get("average") or order.get("price") or price)
-            pnl = await remove_position(EXCHANGE_NAME, symbol, side, fill_price, close_reason)
+            pnl = await remove_position(EXCHANGE_NAME, symbol, side, fill_price, close_reason,
+                                        strategy=pos.get("strategy"))
             await add_daily_pnl(pnl, pnl > 0)
             return {"status": "success", "symbol": symbol, "side": side,
                     "price": fill_price, "pnl": pnl, "close_reason": close_reason}
@@ -268,7 +276,8 @@ class BinanceExchange:
         results   = []
         for pos in [dict(p) for p in positions]:
             price = await self.get_price(pos["symbol"]) or pos["entry_price"]
-            r = await self.close_position(pos["symbol"], pos["side"], price, "emergency_close")
+            r = await self.close_position(pos["symbol"], pos["side"], price, "emergency_close",
+                                          strategy=pos.get("strategy"))
             results.append(r)
         return results
 
