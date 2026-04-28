@@ -23,7 +23,7 @@ from bot.state import (
     get_consecutive_losses,
 )
 from bot.exchange import binance_exchange
-from bot.scanner import load_top50_symbols, load_symbols_1h, scan_all
+from bot.scanner import load_top50_symbols, scan_all
 from bot.fundamental import fundamental_filter
 from bot.notifier import notifier
 
@@ -40,7 +40,6 @@ logger = logging.getLogger("scalping_bot")
 
 # Símbolos cargados una vez al startup
 _symbols: list[dict] = []
-_symbols_1h: list[dict] = []
 
 
 # ── Background tasks ──────────────────────────────────────────────────────────
@@ -56,8 +55,8 @@ async def _signal_scanner():
         if not _symbols:
             continue
         try:
-            logger.info(f"[SCANNER] Iniciando scan — {len(_symbols)} simbolos 15m, {len(_symbols_1h)} simbolos 1H")
-            signals, blocked = await scan_all(_symbols, _symbols_1h)
+            logger.info(f"[SCANNER] Iniciando scan — {len(_symbols)} simbolos 15m")
+            signals, blocked = await scan_all(_symbols)
             logger.info(f"[SCANNER] {len(signals)} señal(es), {len(blocked)} bloqueada(s) por tendencia 1H")
 
             # Loguear señales bloqueadas por tendencia o funding (sin marcarlas como processed)
@@ -397,7 +396,7 @@ async def _trend_outcome_evaluator():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _symbols, _symbols_1h
+    global _symbols
     db_url = settings.DATABASE_URL
     masked = db_url[:30] + "..." if len(db_url) > 30 else repr(db_url)
     logger.info(f"[STARTUP] DATABASE_URL = {masked}")
@@ -413,11 +412,8 @@ async def lifespan(app: FastAPI):
     notifier.exchange = binance_exchange
     await notifier.start()
 
-    top50 = await load_top50_symbols()
-    _symbols = top50
-    _symbols_1h = load_symbols_1h()
+    _symbols = await load_top50_symbols()
     logger.info(f"[STARTUP] {len(_symbols)} símbolos 15m top50: {[s['symbol'] for s in _symbols[:5]]}...")
-    logger.info(f"[STARTUP] {len(_symbols_1h)} símbolos 1H v2: {[s['symbol'] for s in _symbols_1h[:5]]}...")
 
     discrepancies = await binance_exchange.reconcile()
     if discrepancies:
@@ -462,7 +458,7 @@ def _check_secret(x_secret: str = Header(default="", alias="X-Secret")):
 @app.get("/health")
 async def health():
     return {"status": "ok", "mode": "paper" if settings.TESTNET else "real",
-            "symbols": len(_symbols), "symbols_1h": len(_symbols_1h)}
+            "symbols": len(_symbols)}
 
 
 @app.get("/dashboard", response_class=__import__("fastapi.responses", fromlist=["HTMLResponse"]).HTMLResponse)
@@ -490,9 +486,8 @@ async def dashboard():
     pnl_class = "pos" if pnl_d >= 0 else "neg"
 
     STRATS = [
-        {"key": "donchian",   "label": "15m Donchian", "color": "#00bcd4", "sym": len(_symbols)},
-        {"key": "tcp",        "label": "TCP 15m",      "color": "#ff9800", "sym": len(_symbols)},
-        {"key": "donchian_1h","label": "1H v2",        "color": "#00e676", "sym": len(_symbols_1h)},
+        {"key": "donchian", "label": "15m Donchian", "color": "#00bcd4", "sym": len(_symbols)},
+        {"key": "tcp",      "label": "TCP 15m",      "color": "#ff9800", "sym": len(_symbols)},
     ]
     strat_by_key = {r["strategy"]: r for r in strat_rows}
 
@@ -599,8 +594,7 @@ async def dashboard():
             <h1 style="margin:0;font-size:18px">SCALPING BOT <span style="color:#555;font-size:12px">{mode}</span></h1>
             <div style="font-size:10px;color:#444;margin-top:3px">
                 <span style="color:#00bcd4">15m Donchian</span> ({len(_symbols)} sym) &nbsp;|&nbsp;
-                <span style="color:#ff9800">TCP 15m</span> &nbsp;|&nbsp;
-                <span style="color:#00e676">1H v2 Donchian</span> ({len(_symbols_1h)} sym)
+                <span style="color:#ff9800">TCP 15m</span> ({len(_symbols)} sym)
             </div>
         </div>
         <div style="text-align:right">
@@ -624,11 +618,9 @@ async def dashboard():
             <button class="tab active" onclick="filterTab('all',this)">Todas</button>
             <button class="tab" onclick="filterTab('donchian',this)" style="border-color:#00bcd444;color:#00bcd4">15m Donchian</button>
             <button class="tab" onclick="filterTab('tcp',this)" style="border-color:#ff980044;color:#ff9800">TCP 15m</button>
-            <button class="tab" onclick="filterTab('donchian_1h',this)" style="border-color:#00e67644;color:#00e676">1H v2</button>
-        </div>
+            </div>
         <div style="display:flex;gap:8px">
             <button onclick="resetBot('15m')" style="padding:7px 14px;border-radius:8px;border:1px solid #ff525244;background:#ff52520d;color:#ff5252;cursor:pointer;font-size:11px;font-weight:bold">🗑 Reset 15m Bot</button>
-            <button onclick="resetBot('1h')"  style="padding:7px 14px;border-radius:8px;border:1px solid #ff980044;background:#ff98000d;color:#ff9800;cursor:pointer;font-size:11px;font-weight:bold">🗑 Reset 1H Bot</button>
         </div>
     </div>
 

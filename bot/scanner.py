@@ -44,15 +44,6 @@ TCP_SL_MULT  = 1.2   # SL = 1.2x ATR
 TCP_TP_MULT  = 2.5   # TP = 2.5x ATR  → ratio ~2:1
 TCP_ZONE_PCT = 0.003 # 0.3% tolerancia para "toca EMA20"
 
-# ── Donchian 1H v2 ────────────────────────────────────────────────────────────
-D1H_LOOKBACK = 30
-D1H_VOL_MULT = 2.0
-D1H_BODY_PCT = 0.35
-D1H_SL_MULT  = 1.5
-D1H_TP_MULT  = 3.5
-D1H_TOP_N    = 50
-D1H_MIN_WR   = 30.0   # backtest 1H: breakeven real ~33%, usamos 30% para incluir top 50
-
 
 def _build_exchange() -> ccxt_async.binance:
     return ccxt_async.binance({
@@ -430,26 +421,6 @@ async def scan_symbol_tcp(exchange: ccxt_async.binance, config: dict) -> Optiona
         return None
 
 
-# Símbolos 1H v2 — top 50 por retorno en backtest Donchian 1H (datos históricos 2024-2026)
-SYMBOLS_1H_V2 = [
-    "ORDI/USDT", "WIF/USDT",  "SEI/USDT",  "FTM/USDT",  "PEPE/USDT",
-    "LINK/USDT", "STX/USDT",  "TIA/USDT",  "FET/USDT",  "FLOW/USDT",
-    "IMX/USDT",  "DOGE/USDT", "GRT/USDT",  "DOT/USDT",  "EGLD/USDT",
-    "WLD/USDT",  "ETH/USDT",  "ADA/USDT",  "AVAX/USDT", "ICP/USDT",
-    "TRX/USDT",  "THETA/USDT","SOL/USDT",  "OP/USDT",   "NEAR/USDT",
-    "ALGO/USDT", "INJ/USDT",  "GALA/USDT", "MATIC/USDT","FIL/USDT",
-    "UNI/USDT",  "ARB/USDT",  "TRB/USDT",  "BTC/USDT",  "BNB/USDT",
-    "XRP/USDT",  "ATOM/USDT", "LTC/USDT",  "BCH/USDT",  "AAVE/USDT",
-    "SNX/USDT",  "MKR/USDT",  "RUNE/USDT", "APT/USDT",  "SUI/USDT",
-    "BONK/USDT", "JUP/USDT",  "PENDLE/USDT","TON/USDT", "KAS/USDT",
-]
-
-
-def load_symbols_1h() -> list[dict]:
-    """Fallback sync — en startup se usa load_top50_symbols() async."""
-    return [{"symbol": s} for s in SYMBOLS_1H_V2]
-
-
 async def load_top50_symbols() -> list[dict]:
     """Top 50 futuros perpetuos USDT de Binance, ordenados por volumen 24h."""
     exchange = _build_exchange()
@@ -472,7 +443,7 @@ async def load_top50_symbols() -> list[dict]:
         return top50
     except Exception as e:
         logger.error(f"[SCANNER] Error cargando top50 de Binance: {e} — usando fallback")
-        return [{"symbol": s} for s in SYMBOLS_1H_V2]
+        return []
     finally:
         try:
             await exchange.close()
@@ -480,91 +451,12 @@ async def load_top50_symbols() -> list[dict]:
             pass
 
 
-async def scan_symbol_donchian_1h(exchange: ccxt_async.binance, config: dict) -> Optional[dict]:
-    """
-    Donchian Breakout en 1H — mismos parametros que 15m pero sobre velas horarias.
-    Sin filtro de tendencia superior (backtest 1H fue rentable sin el).
-    SL=1.5xATR, TP=3.5xATR, Vol>2x, Body>35%.
-    """
-    symbol = config["symbol"]
-    try:
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe="1h", limit=D1H_LOOKBACK + 20)
-        if len(ohlcv) < D1H_LOOKBACK + 2:
-            return None
-
-        df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
-        df.ta.atr(length=14, append=True)
-        atr_col = [c for c in df.columns if c.startswith("ATR")]
-        if not atr_col or pd.isna(df[atr_col[0]].iloc[-1]):
-            return None
-        atr = float(df[atr_col[0]].iloc[-1])
-
-        df["upper"]   = df["high"].shift(1).rolling(window=D1H_LOOKBACK).max()
-        df["lower"]   = df["low"].shift(1).rolling(window=D1H_LOOKBACK).min()
-        df["vol_avg"] = df["volume"].rolling(window=D1H_LOOKBACK).mean()
-
-        last = df.iloc[-2]   # ultima vela 1H cerrada
-        candle_ts  = str(int(last["timestamp"]))
-        last_close = float(last["close"])
-        last_open  = float(last["open"])
-        last_high  = float(last["high"])
-        last_low   = float(last["low"])
-        last_vol   = float(last["volume"])
-        upper      = float(last["upper"])
-        lower      = float(last["lower"])
-        vol_avg    = float(last["vol_avg"])
-
-        if pd.isna(upper) or pd.isna(lower) or pd.isna(vol_avg) or vol_avg == 0:
-            return None
-
-        candle_range = last_high - last_low
-        candle_body  = abs(last_close - last_open)
-        body_ok = (candle_body / candle_range) >= D1H_BODY_PCT if candle_range > 0 else False
-        vol_ok  = last_vol > vol_avg * D1H_VOL_MULT
-
-        # LONG
-        if last_high > upper and vol_ok and body_ok and last_close > last_open:
-            sl_price = round(last_close - atr * D1H_SL_MULT, 6)
-            tp_price = round(last_close + atr * D1H_TP_MULT, 6)
-            funding  = await _get_funding_rate(exchange, symbol)
-            if funding is not None and funding > FUNDING_LONG_BLOCK:
-                return {"symbol": symbol, "side": "long", "price": last_close,
-                        "sl_price": sl_price, "tp_price": tp_price,
-                        "candle_ts": candle_ts, "blocked_reason": f"funding_high|{funding:.5f}",
-                        "strategy": "donchian_1h"}
-            logger.info(f"[1H] {symbol} LONG entry={last_close} sl={sl_price} tp={tp_price}")
-            return {"symbol": symbol, "side": "long", "price": last_close,
-                    "sl_price": sl_price, "tp_price": tp_price,
-                    "candle_ts": candle_ts, "strategy": "donchian_1h"}
-
-        # SHORT
-        elif last_low < lower and vol_ok and body_ok and last_close < last_open:
-            sl_price = round(last_close + atr * D1H_SL_MULT, 6)
-            tp_price = round(last_close - atr * D1H_TP_MULT, 6)
-            funding  = await _get_funding_rate(exchange, symbol)
-            if funding is not None and funding < FUNDING_SHORT_BLOCK:
-                return {"symbol": symbol, "side": "short", "price": last_close,
-                        "sl_price": sl_price, "tp_price": tp_price,
-                        "candle_ts": candle_ts, "blocked_reason": f"funding_low|{funding:.5f}",
-                        "strategy": "donchian_1h"}
-            logger.info(f"[1H] {symbol} SHORT entry={last_close} sl={sl_price} tp={tp_price}")
-            return {"symbol": symbol, "side": "short", "price": last_close,
-                    "sl_price": sl_price, "tp_price": tp_price,
-                    "candle_ts": candle_ts, "strategy": "donchian_1h"}
-
-        return None
-    except Exception as e:
-        logger.warning(f"[1H] {symbol}: {e}")
-        return None
-
-
-async def scan_all(symbols: list[dict], symbols_1h: list[dict] = None) -> tuple[list[dict], list[dict]]:
-    """Corre Donchian 15m + TCP + Donchian 1H v2 en paralelo. Retorna (senales_validas, bloqueadas)."""
+async def scan_all(symbols: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Corre Donchian 15m + TCP en paralelo. Retorna (senales_validas, bloqueadas)."""
     import asyncio
     exchange = _build_exchange()
     signals: list[dict] = []
     blocked: list[dict] = []
-    # 10 concurrent: bien dentro de límite Binance (1200 req/min). ccxt enableRateLimit también regula.
     sem = asyncio.Semaphore(10)
 
     async def _scan_one(config: dict, scanner, strat: str) -> None:
@@ -587,11 +479,11 @@ async def scan_all(symbols: list[dict], symbols_1h: list[dict] = None) -> tuple[
         for config in symbols:
             tasks.append(_scan_one(config, scan_symbol, "donchian"))
             tasks.append(_scan_one(config, scan_symbol_tcp, "tcp"))
-        for config in (symbols_1h or []):
-            tasks.append(_scan_one(config, scan_symbol_donchian_1h, "donchian_1h"))
-
         await asyncio.gather(*tasks)
     finally:
-        await exchange.close()
+        try:
+            await exchange.close()
+        except Exception:
+            pass
 
     return signals, blocked
