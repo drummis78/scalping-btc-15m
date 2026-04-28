@@ -70,7 +70,8 @@ async def _signal_scanner():
                         b["sl_price"], b["tp_price"],
                         True, f"{reason}|{b['candle_ts']}", 0.0, verdict,
                         json.dumps({"outcome": "pending", "blocked_reason": reason}),
-                        b.get("strategy", "donchian")
+                        b.get("strategy", "donchian"),
+                        chop_val=b.get("chop_val"),
                     )
 
             # Máximo 2 entradas nuevas por ciclo para evitar concentración de riesgo
@@ -95,6 +96,7 @@ async def _process_signal(sig: dict):
     tp_price  = sig["tp_price"]
     candle_ts = sig["candle_ts"]
     strategy  = sig.get("strategy", "donchian")
+    chop_val  = sig.get("chop_val")
     ts        = datetime.now(timezone.utc).isoformat()
 
     # Anti-replay por vela (incluye strategy para permitir ambas en misma vela)
@@ -107,7 +109,7 @@ async def _process_signal(sig: dict):
         logger.debug(f"[SKIP] {symbol} {side} — posición ya abierta ({strategy})")
         await log_signal(ts, symbol, side, price, sl_price, tp_price,
                          True, f"conflict|pos_abierta|{candle_ts}", 0.0, "blocked_conflict",
-                         json.dumps({"outcome": "pending"}), strategy)
+                         json.dumps({"outcome": "pending"}), strategy, chop_val=chop_val)
         return
 
     # Max posiciones por grupo de estrategia
@@ -135,7 +137,7 @@ async def _process_signal(sig: dict):
                     logger.info(f"[COOLDOWN] {symbol} bloqueado — {-streak} pérdidas consecutivas, cooldown {remaining}m restantes")
                     await log_signal(ts, symbol, side, price, sl_price, tp_price,
                                      True, f"cooldown|{-streak}_losses_consecutivas", 0.0,
-                                     "blocked_cooldown", "", strategy)
+                                     "blocked_cooldown", "", strategy, chop_val=chop_val)
                     return "cooldown"
             except Exception:
                 pass
@@ -160,7 +162,8 @@ async def _process_signal(sig: dict):
         logger.error(f"[CIRCUIT BREAKER] dd={dd:.1f}% peak=${peak:.2f} current=${balance:.2f}")
         await notifier.notify(msg)
         await log_signal(ts, symbol, side, price, sl_price, tp_price,
-                         True, f"circuit_breaker dd={dd:.1f}%", 0.0, "circuit_breaker", "", strategy)
+                         True, f"circuit_breaker dd={dd:.1f}%", 0.0, "circuit_breaker", "", strategy,
+                         chop_val=chop_val)
         return
 
     # Circuit breaker — pérdida diaria
@@ -171,7 +174,8 @@ async def _process_signal(sig: dict):
             f"Pérdida del día: `${daily['realized_pnl']:+.2f}` | Límite: `{settings.MAX_DAILY_LOSS_PCT}%`"
         )
         await log_signal(ts, symbol, side, price, sl_price, tp_price,
-                         True, "max_daily_loss", 0.0, "circuit_breaker_daily", "", strategy)
+                         True, "max_daily_loss", 0.0, "circuit_breaker_daily", "", strategy,
+                         chop_val=chop_val)
         return
 
     # Fundamental filter
@@ -192,7 +196,8 @@ async def _process_signal(sig: dict):
         )
         await log_signal(ts, symbol, side, price, sl_price, tp_price,
                          False, _fund_reason, _fund_impact, "filtered_fundamental",
-                         json.dumps({"outcome": "pending", "blocked_reason": "filtered_fundamental"}), strategy)
+                         json.dumps({"outcome": "pending", "blocked_reason": "filtered_fundamental"}), strategy,
+                         chop_val=chop_val)
         return
 
     # Ejecutar
@@ -206,7 +211,7 @@ async def _process_signal(sig: dict):
     await log_signal(ts, symbol, side, price, sl_price, tp_price,
                      _fund_allow, _fund_reason, _fund_impact,
                      "executed" if result["status"] == "success" else f"error_{result.get('reason','')}",
-                     json.dumps(result), strategy)
+                     json.dumps(result), strategy, chop_val=chop_val)
 
     if result["status"] == "success":
         lev = result.get("leverage", settings.MAX_LEVERAGE)
@@ -487,6 +492,32 @@ async def dashboard():
                    SUM(CASE WHEN close_reason='sl_hit' THEN 1 ELSE 0 END) sl_hits
             FROM trades GROUP BY strategy ORDER BY strategy
         """)]
+        chop_analysis = [dict(r) for r in await conn.fetch("""
+            SELECT
+                CASE
+                    WHEN chop_val IS NULL  THEN '— sin dato (ADX bloqueó antes)'
+                    WHEN chop_val >= 61.8 THEN '≥61.8 lateral (CHOP bloqueó)'
+                    WHEN chop_val >= 55   THEN '55–61.8 casi lateral'
+                    WHEN chop_val >= 40   THEN '40–55 tendencia moderada'
+                    ELSE                       '<40 tendencia fuerte'
+                END AS rango,
+                CASE
+                    WHEN chop_val IS NULL  THEN 5
+                    WHEN chop_val >= 61.8 THEN 1
+                    WHEN chop_val >= 55   THEN 2
+                    WHEN chop_val >= 40   THEN 3
+                    ELSE                       4
+                END AS orden,
+                COUNT(*) total,
+                SUM(CASE WHEN verdict='executed' THEN 1 ELSE 0 END) ejecutados,
+                SUM(CASE WHEN result_json LIKE '%would_lose%' THEN 1 ELSE 0 END) correcto,
+                SUM(CASE WHEN result_json LIKE '%would_win%'  THEN 1 ELSE 0 END) error,
+                SUM(CASE WHEN result_json LIKE '%pending%'    THEN 1 ELSE 0 END) pendiente,
+                ROUND(AVG(chop_val)::numeric, 1) chop_avg
+            FROM signal_log
+            GROUP BY rango, orden
+            ORDER BY orden
+        """)]
         filter_summary = [dict(r) for r in await conn.fetch("""
             SELECT verdict,
                    COUNT(*) total,
@@ -654,6 +685,47 @@ async def dashboard():
                 f"<td style='color:#ff5252'>{e}</td>"
                 f"<td style='color:#555'>{p}</td>"
                 f"<td style='color:{eff_c};font-weight:bold'>{eff}%</td></tr>"
+            )
+        return "".join(rows)
+
+    def rows_chop_analysis():
+        if not chop_analysis:
+            return "<tr><td colspan=8 style='color:#555;text-align:center;padding:16px'>Sin datos aún — datos disponibles después del próximo ciclo de scanner</td></tr>"
+        rows = []
+        for r in chop_analysis:
+            t  = int(r["total"])
+            ej = int(r["ejecutados"])
+            c  = int(r["correcto"])
+            e  = int(r["error"])
+            p  = int(r["pendiente"])
+            resolved = c + e
+            eff = round(c / resolved * 100, 1) if resolved else 0
+            eff_c = "#00e676" if eff >= 55 else ("#ffa500" if eff >= 45 else ("#ff5252" if resolved else "#555"))
+            rango = r["rango"]
+            chop_avg = r["chop_avg"]
+            avg_str = f"{chop_avg:.1f}" if chop_avg else "—"
+            # Colorear el rango según zona
+            if "≥61.8" in rango:
+                rango_c = "#ff5252"
+            elif "55–61.8" in rango:
+                rango_c = "#ffa500"
+            elif "40–55" in rango:
+                rango_c = "#aaa"
+            elif "<40" in rango:
+                rango_c = "#00e676"
+            else:
+                rango_c = "#555"
+            rows.append(
+                f"<tr>"
+                f"<td><b style='color:{rango_c}'>{rango}</b></td>"
+                f"<td style='color:#888'>{avg_str}</td>"
+                f"<td style='color:#aaa'>{t}</td>"
+                f"<td style='color:#00bcd4'>{ej}</td>"
+                f"<td style='color:#00e676'>{c}</td>"
+                f"<td style='color:#ff5252'>{e}</td>"
+                f"<td style='color:#555'>{p}</td>"
+                f"<td style='color:{eff_c};font-weight:bold'>{eff}%</td>"
+                f"</tr>"
             )
         return "".join(rows)
 
@@ -837,6 +909,26 @@ async def dashboard():
         <th>Efectividad</th>
     </tr></thead>
     <tbody>{rows_filter_detail()}</tbody></table>
+
+    <h2>Análisis CHOP 1H</h2>
+    <div style="font-size:11px;color:#555;margin-bottom:10px">
+        El CHOP se calcula solo para señales que pasaron ADX (≥25). Umbral de bloqueo: <b style="color:#ffa500">{settings.REGIME_CHOP_THRESHOLD}</b> &nbsp;|&nbsp;
+        <b style="color:#ff5252">≥61.8</b> = lateral = bloqueado &nbsp;|&nbsp;
+        <b style="color:#00e676">&lt;40</b> = tendencia fuerte &nbsp;|&nbsp;
+        <b>Correcto</b> = filtrado correctamente (hubiera perdido) &nbsp;|&nbsp;
+        <b>Error</b> = filtró una ganancia
+    </div>
+    <table><thead><tr>
+        <th>Rango CHOP 1H</th>
+        <th>CHOP prom.</th>
+        <th>Total señales</th>
+        <th style="color:#00bcd4">Ejecutadas</th>
+        <th style="color:#00e676">Correcto ✓</th>
+        <th style="color:#ff5252">Error ✗</th>
+        <th>Pendiente</th>
+        <th>Efectividad filtro</th>
+    </tr></thead>
+    <tbody>{rows_chop_analysis()}</tbody></table>
 
     <div class="refresh-note">Auto-refresh cada 60s</div>
     </div>

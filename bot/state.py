@@ -134,6 +134,9 @@ async def init_db():
             )
         """)
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_fund_ts ON fundamental_events(ts)")
+        await conn.execute(
+            "ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS chop_val REAL DEFAULT NULL"
+        )
 
 
 # ── Anti-replay ───────────────────────────────────────────────────────────────
@@ -338,15 +341,17 @@ async def get_current_dd_pct(initial: float, current_balance: float) -> float:
 async def log_signal(ts: str, symbol: str, side: str, price: float,
                      sl_price: float, tp_price: float,
                      fund_allow: bool, fund_reason: str, fund_impact: float,
-                     verdict: str, result_json: str = "", strategy: str = "donchian"):
+                     verdict: str, result_json: str = "", strategy: str = "donchian",
+                     chop_val: float = None):
     async with get_pool().acquire() as conn:
         await conn.execute("""
             INSERT INTO signal_log
             (ts, symbol, side, price, sl_price, tp_price,
-             fund_allow, fund_reason, fund_impact, verdict, result_json, strategy)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+             fund_allow, fund_reason, fund_impact, verdict, result_json, strategy, chop_val)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
         """, ts, symbol, side, price, sl_price, tp_price,
-             1 if fund_allow else 0, fund_reason, fund_impact, verdict, result_json, strategy)
+             1 if fund_allow else 0, fund_reason, fund_impact, verdict, result_json, strategy,
+             chop_val)
 
 
 async def get_consecutive_losses() -> tuple[int, str | None]:

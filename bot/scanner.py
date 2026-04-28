@@ -70,20 +70,20 @@ async def _get_1h_trend(exchange: ccxt_async.binance, symbol: str) -> Optional[s
         return None
 
 
-async def _get_regime_1h(exchange: ccxt_async.binance, symbol: str) -> str:
+async def _get_regime_1h(exchange: ccxt_async.binance, symbol: str) -> tuple[str, float]:
     """
     Detecta régimen de mercado en 1H usando Choppiness Index.
-    Retorna 'lateral' si CHOP >= threshold, 'trending' si CHOP < threshold, 'unknown' si falla.
+    Retorna (regime, chop_val): regime = 'lateral'|'trending'|'unknown', chop_val = valor numérico.
     CHOP(n) = 100 * log10(sum(TR,n) / (HH-LL,n)) / log10(n)
     """
     if not settings.REGIME_FILTER_ENABLED:
-        return "trending"
+        return "trending", 0.0
     try:
         import math
         n = settings.REGIME_CHOP_LEN
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe="1h", limit=n + 5)
         if len(ohlcv) < n + 2:
-            return "unknown"
+            return "unknown", 0.0
         highs  = pd.Series([c[2] for c in ohlcv])
         lows   = pd.Series([c[3] for c in ohlcv])
         closes = pd.Series([c[4] for c in ohlcv])
@@ -96,13 +96,13 @@ async def _get_regime_1h(exchange: ccxt_async.binance, symbol: str) -> str:
         hh      = float(highs.iloc[-n:].max())
         ll      = float(lows.iloc[-n:].min())
         if hh == ll or atr_sum <= 0:
-            return "unknown"
-        chop = 100 * math.log10(atr_sum / (hh - ll)) / math.log10(n)
+            return "unknown", 0.0
+        chop = round(100 * math.log10(atr_sum / (hh - ll)) / math.log10(n), 1)
         regime = "lateral" if chop >= settings.REGIME_CHOP_THRESHOLD else "trending"
         logger.debug(f"[REGIME] {symbol} CHOP1H={chop:.1f} → {regime}")
-        return regime
+        return regime, chop
     except Exception:
-        return "unknown"
+        return "unknown", 0.0
 
 
 async def _get_funding_rate(exchange: ccxt_async.binance, symbol: str) -> Optional[float]:
@@ -208,21 +208,23 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
             sl_price = round(last_close - atr * SL_MULT, 6)
             tp_price = round(last_close + atr * TP_MULT, 6)
 
-            regime = await _get_regime_1h(exchange, symbol)
+            regime, chop_val = await _get_regime_1h(exchange, symbol)
             if regime == "lateral":
-                logger.info(f"[SCANNER] {symbol} LONG bloqueado: régimen lateral 1H")
+                logger.info(f"[SCANNER] {symbol} LONG bloqueado: régimen lateral 1H CHOP={chop_val}")
                 return {
                     "symbol": symbol, "side": "long", "price": last_close,
                     "sl_price": sl_price, "tp_price": tp_price,
                     "candle_ts": candle_ts, "blocked_reason": "regime_lateral",
+                    "chop_val": chop_val,
                 }
             trend = await _get_1h_trend(exchange, symbol)
             if trend == "down":
-                logger.info(f"[SCANNER] {symbol} LONG bloqueado: 1H bajista")
+                logger.info(f"[SCANNER] {symbol} LONG bloqueado: 1H bajista CHOP={chop_val}")
                 return {
                     "symbol": symbol, "side": "long", "price": last_close,
                     "sl_price": sl_price, "tp_price": tp_price,
                     "candle_ts": candle_ts, "blocked_reason": "trend_1h_bearish",
+                    "chop_val": chop_val,
                 }
             funding = await _get_funding_rate(exchange, symbol)
             if funding is not None and funding > FUNDING_LONG_BLOCK:
@@ -231,8 +233,9 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
                     "symbol": symbol, "side": "long", "price": last_close,
                     "sl_price": sl_price, "tp_price": tp_price,
                     "candle_ts": candle_ts, "blocked_reason": f"funding_high|{funding:.5f}",
+                    "chop_val": chop_val,
                 }
-            logger.info(f"[SCANNER] ✅ {symbol} LONG entry={last_close} sl={sl_price} tp={tp_price} funding={funding}")
+            logger.info(f"[SCANNER] ✅ {symbol} LONG entry={last_close} sl={sl_price} tp={tp_price} CHOP={chop_val}")
             return {
                 "symbol":    symbol,
                 "side":      "long",
@@ -240,6 +243,7 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
                 "sl_price":  sl_price,
                 "tp_price":  tp_price,
                 "candle_ts": candle_ts,
+                "chop_val":  chop_val,
             }
 
         # ── SHORT: low cae bajo DC lower, vela roja con cuerpo real, ADX confirma ─
@@ -255,21 +259,23 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
             sl_price = round(last_close + atr * SL_MULT, 6)
             tp_price = round(last_close - atr * TP_MULT, 6)
 
-            regime = await _get_regime_1h(exchange, symbol)
+            regime, chop_val = await _get_regime_1h(exchange, symbol)
             if regime == "lateral":
-                logger.info(f"[SCANNER] {symbol} SHORT bloqueado: régimen lateral 1H")
+                logger.info(f"[SCANNER] {symbol} SHORT bloqueado: régimen lateral 1H CHOP={chop_val}")
                 return {
                     "symbol": symbol, "side": "short", "price": last_close,
                     "sl_price": sl_price, "tp_price": tp_price,
                     "candle_ts": candle_ts, "blocked_reason": "regime_lateral",
+                    "chop_val": chop_val,
                 }
             trend = await _get_1h_trend(exchange, symbol)
             if trend == "up":
-                logger.info(f"[SCANNER] {symbol} SHORT bloqueado: 1H alcista")
+                logger.info(f"[SCANNER] {symbol} SHORT bloqueado: 1H alcista CHOP={chop_val}")
                 return {
                     "symbol": symbol, "side": "short", "price": last_close,
                     "sl_price": sl_price, "tp_price": tp_price,
                     "candle_ts": candle_ts, "blocked_reason": "trend_1h_bullish",
+                    "chop_val": chop_val,
                 }
             funding = await _get_funding_rate(exchange, symbol)
             if funding is not None and funding < FUNDING_SHORT_BLOCK:
@@ -278,8 +284,9 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
                     "symbol": symbol, "side": "short", "price": last_close,
                     "sl_price": sl_price, "tp_price": tp_price,
                     "candle_ts": candle_ts, "blocked_reason": f"funding_low|{funding:.5f}",
+                    "chop_val": chop_val,
                 }
-            logger.info(f"[SCANNER] ✅ {symbol} SHORT entry={last_close} sl={sl_price} tp={tp_price} funding={funding}")
+            logger.info(f"[SCANNER] ✅ {symbol} SHORT entry={last_close} sl={sl_price} tp={tp_price} CHOP={chop_val}")
             return {
                 "symbol":    symbol,
                 "side":      "short",
@@ -287,6 +294,7 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
                 "sl_price":  sl_price,
                 "tp_price":  tp_price,
                 "candle_ts": candle_ts,
+                "chop_val":  chop_val,
             }
 
         return None
@@ -378,31 +386,31 @@ async def scan_symbol_tcp(exchange: ccxt_async.binance, config: dict) -> Optiona
             if touched and rsi_ok and green and vol_ok and adx_val >= settings.ADX_THRESHOLD:
                 sl_price = round(last_close - atr * TCP_SL_MULT, 6)
                 tp_price = round(last_close + atr * TCP_TP_MULT, 6)
-                regime = await _get_regime_1h(exchange, symbol)
+                regime, chop_val = await _get_regime_1h(exchange, symbol)
                 if regime == "lateral":
-                    logger.info(f"[TCP] {symbol} LONG bloqueado: régimen lateral 1H")
+                    logger.info(f"[TCP] {symbol} LONG bloqueado: régimen lateral 1H CHOP={chop_val}")
                     return {"symbol": symbol, "side": "long", "price": last_close,
                             "sl_price": sl_price, "tp_price": tp_price,
                             "candle_ts": candle_ts, "blocked_reason": "regime_lateral",
-                            "strategy": "tcp"}
+                            "chop_val": chop_val, "strategy": "tcp"}
                 trend = await _get_1h_trend(exchange, symbol)
                 if trend == "down":
-                    logger.info(f"[TCP] {symbol} LONG bloqueado: 1H bajista")
+                    logger.info(f"[TCP] {symbol} LONG bloqueado: 1H bajista CHOP={chop_val}")
                     return {"symbol": symbol, "side": "long", "price": last_close,
                             "sl_price": sl_price, "tp_price": tp_price,
                             "candle_ts": candle_ts, "blocked_reason": "trend_1h_bearish",
-                            "strategy": "tcp"}
+                            "chop_val": chop_val, "strategy": "tcp"}
                 funding = await _get_funding_rate(exchange, symbol)
                 if funding is not None and funding > FUNDING_LONG_BLOCK:
                     logger.info(f"[TCP] {symbol} LONG bloqueado: funding={funding:.5f}")
                     return {"symbol": symbol, "side": "long", "price": last_close,
                             "sl_price": sl_price, "tp_price": tp_price,
                             "candle_ts": candle_ts, "blocked_reason": f"funding_high|{funding:.5f}",
-                            "strategy": "tcp"}
-                logger.info(f"[TCP] ✅ {symbol} LONG pullback entry={last_close} ema20={ema20:.4f} rsi={rsi:.1f}")
+                            "chop_val": chop_val, "strategy": "tcp"}
+                logger.info(f"[TCP] ✅ {symbol} LONG pullback entry={last_close} ema20={ema20:.4f} rsi={rsi:.1f} CHOP={chop_val}")
                 return {"symbol": symbol, "side": "long", "price": last_close,
                         "sl_price": sl_price, "tp_price": tp_price,
-                        "candle_ts": candle_ts, "strategy": "tcp"}
+                        "candle_ts": candle_ts, "chop_val": chop_val, "strategy": "tcp"}
 
         # ── TCP SHORT ─────────────────────────────────────────────────────────
         elif ema20 < ema50:
@@ -419,31 +427,31 @@ async def scan_symbol_tcp(exchange: ccxt_async.binance, config: dict) -> Optiona
             if touched and rsi_ok and red and vol_ok and adx_val >= settings.ADX_THRESHOLD:
                 sl_price = round(last_close + atr * TCP_SL_MULT, 6)
                 tp_price = round(last_close - atr * TCP_TP_MULT, 6)
-                regime = await _get_regime_1h(exchange, symbol)
+                regime, chop_val = await _get_regime_1h(exchange, symbol)
                 if regime == "lateral":
-                    logger.info(f"[TCP] {symbol} SHORT bloqueado: régimen lateral 1H")
+                    logger.info(f"[TCP] {symbol} SHORT bloqueado: régimen lateral 1H CHOP={chop_val}")
                     return {"symbol": symbol, "side": "short", "price": last_close,
                             "sl_price": sl_price, "tp_price": tp_price,
                             "candle_ts": candle_ts, "blocked_reason": "regime_lateral",
-                            "strategy": "tcp"}
+                            "chop_val": chop_val, "strategy": "tcp"}
                 trend = await _get_1h_trend(exchange, symbol)
                 if trend == "up":
-                    logger.info(f"[TCP] {symbol} SHORT bloqueado: 1H alcista")
+                    logger.info(f"[TCP] {symbol} SHORT bloqueado: 1H alcista CHOP={chop_val}")
                     return {"symbol": symbol, "side": "short", "price": last_close,
                             "sl_price": sl_price, "tp_price": tp_price,
                             "candle_ts": candle_ts, "blocked_reason": "trend_1h_bullish",
-                            "strategy": "tcp"}
+                            "chop_val": chop_val, "strategy": "tcp"}
                 funding = await _get_funding_rate(exchange, symbol)
                 if funding is not None and funding < FUNDING_SHORT_BLOCK:
                     logger.info(f"[TCP] {symbol} SHORT bloqueado: funding={funding:.5f}")
                     return {"symbol": symbol, "side": "short", "price": last_close,
                             "sl_price": sl_price, "tp_price": tp_price,
                             "candle_ts": candle_ts, "blocked_reason": f"funding_low|{funding:.5f}",
-                            "strategy": "tcp"}
-                logger.info(f"[TCP] ✅ {symbol} SHORT pullback entry={last_close} ema20={ema20:.4f} rsi={rsi:.1f}")
+                            "chop_val": chop_val, "strategy": "tcp"}
+                logger.info(f"[TCP] ✅ {symbol} SHORT pullback entry={last_close} ema20={ema20:.4f} rsi={rsi:.1f} CHOP={chop_val}")
                 return {"symbol": symbol, "side": "short", "price": last_close,
                         "sl_price": sl_price, "tp_price": tp_price,
-                        "candle_ts": candle_ts, "strategy": "tcp"}
+                        "candle_ts": candle_ts, "chop_val": chop_val, "strategy": "tcp"}
 
         return None
     except Exception as e:
