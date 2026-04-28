@@ -137,6 +137,12 @@ async def init_db():
         await conn.execute(
             "ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS chop_val REAL DEFAULT NULL"
         )
+        # Parchear cooldown signals existentes que tienen result_json vacío
+        await conn.execute("""
+            UPDATE signal_log
+            SET result_json = '{"outcome":"pending","blocked_reason":"cooldown"}'
+            WHERE verdict = 'blocked_cooldown' AND (result_json IS NULL OR result_json = '')
+        """)
 
 
 # ── Anti-replay ───────────────────────────────────────────────────────────────
@@ -395,7 +401,7 @@ async def get_pending_blocked_signals() -> list:
     async with get_pool().acquire() as conn:
         rows = await conn.fetch("""
             SELECT * FROM signal_log
-            WHERE verdict IN ('blocked_trend', 'blocked_funding', 'blocked_conflict', 'filtered_fundamental') AND result_json LIKE '%pending%'
+            WHERE verdict IN ('blocked_trend', 'blocked_funding', 'blocked_conflict', 'filtered_fundamental', 'blocked_cooldown') AND result_json LIKE '%pending%'
             ORDER BY id ASC LIMIT 100
         """)
     return [dict(r) for r in rows]

@@ -137,7 +137,9 @@ async def _process_signal(sig: dict):
                     logger.info(f"[COOLDOWN] {symbol} bloqueado — {-streak} pérdidas consecutivas, cooldown {remaining}m restantes")
                     await log_signal(ts, symbol, side, price, sl_price, tp_price,
                                      True, f"cooldown|{-streak}_losses_consecutivas", 0.0,
-                                     "blocked_cooldown", "", strategy, chop_val=chop_val)
+                                     "blocked_cooldown",
+                                     json.dumps({"outcome": "pending", "blocked_reason": "cooldown"}),
+                                     strategy, chop_val=chop_val)
                     return "cooldown"
             except Exception:
                 pass
