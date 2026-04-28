@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     MAX_DAILY_LOSS_PCT:   float = 3.0
     TARGET_DAILY_PCT:     float = 1.0
     PAPER_BALANCE:        float = 1000.0
-    MAX_POSITIONS:        int   = 10   # límite para estrategias 15m (donchian + tcp)
+    MAX_POSITIONS:        int   = 5    # límite para estrategias 15m (donchian + tcp)
     MAX_POSITIONS_1H:     int   = 5    # límite independiente para donchian_1h
     RISK_PER_TRADE:       float = 0.015   # 1.5% equity por trade
 
@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     ATRPCT_FILTER_ENABLED:    bool  = True   # solo operar cuando ATR está en percentil alto
     ATRPCT_FILTER_THRESHOLD:  float = 60.0   # percentil mínimo (0-100)
     ATRPCT_FILTER_LEN:        int   = 100    # ventana rolling para min/max ATR
-    ADX_THRESHOLD:            float = 20.0   # ADX(14) mínimo — sin momentum el breakout revierte
+    ADX_THRESHOLD:            float = 25.0   # ADX(14) mínimo — sin momentum el breakout revierte
 
     FUNDAMENTAL_ENABLED:       bool = True
     FUNDAMENTAL_POLL_INTERVAL: int  = 1800
