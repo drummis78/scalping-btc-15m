@@ -449,6 +449,13 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+@app.middleware("http")
+async def allow_iframe(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Frame-Options"] = "ALLOWALL"
+    response.headers["Content-Security-Policy"] = "frame-ancestors *"
+    return response
+
 
 def _check_secret(x_secret: str = Header(default="", alias="X-Secret")):
     if settings.WEBHOOK_SECRET and x_secret != settings.WEBHOOK_SECRET:
