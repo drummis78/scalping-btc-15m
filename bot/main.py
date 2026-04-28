@@ -453,7 +453,6 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 async def allow_iframe(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Frame-Options"] = "ALLOWALL"
-    response.headers["Content-Security-Policy"] = "frame-ancestors *"
     return response
 
 
@@ -552,7 +551,7 @@ async def dashboard():
             <td><b>{t['symbol']}</b></td>
             <td style="color:{'#00e676' if t['side']=='long' else '#ff5252'}">{t['side'].upper()}</td>
             <td>${t['entry_price']:,.4f}</td>
-            <td>${t['close_price']:,.4f}</td>
+            <td>${t['exit_price']:,.4f}</td>
             <td style="color:{'#00e676' if (t['pnl'] or 0)>=0 else '#ff5252'}">${(t['pnl'] or 0):+.2f}</td>
             <td style="color:{'#00e676' if t.get('close_reason')=='tp_hit' else '#ff5252'}">{t.get('close_reason','').replace('_',' ').upper()}</td>
             <td>{str(t.get('close_time',''))[:16]}</td>
