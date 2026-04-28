@@ -196,6 +196,14 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
         )
 
         # ── LONG: high supera DC upper, vela verde con cuerpo real, ADX confirma ─
+        if last_high > upper and vol_ok and body_ok and last_close > last_open:
+            if adx_val < settings.ADX_THRESHOLD:
+                return {
+                    "symbol": symbol, "side": "long", "price": last_close,
+                    "sl_price": round(last_close - atr * SL_MULT, 6),
+                    "tp_price": round(last_close + atr * TP_MULT, 6),
+                    "candle_ts": candle_ts, "blocked_reason": f"adx_low|{adx_val:.1f}",
+                }
         if last_high > upper and vol_ok and body_ok and last_close > last_open and adx_val >= settings.ADX_THRESHOLD:
             sl_price = round(last_close - atr * SL_MULT, 6)
             tp_price = round(last_close + atr * TP_MULT, 6)
@@ -235,7 +243,15 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
             }
 
         # ── SHORT: low cae bajo DC lower, vela roja con cuerpo real, ADX confirma ─
-        elif last_low < lower and vol_ok and body_ok and last_close < last_open and adx_val >= settings.ADX_THRESHOLD:
+        if last_low < lower and vol_ok and body_ok and last_close < last_open:
+            if adx_val < settings.ADX_THRESHOLD:
+                return {
+                    "symbol": symbol, "side": "short", "price": last_close,
+                    "sl_price": round(last_close + atr * SL_MULT, 6),
+                    "tp_price": round(last_close - atr * TP_MULT, 6),
+                    "candle_ts": candle_ts, "blocked_reason": f"adx_low|{adx_val:.1f}",
+                }
+        if last_low < lower and vol_ok and body_ok and last_close < last_open and adx_val >= settings.ADX_THRESHOLD:
             sl_price = round(last_close + atr * SL_MULT, 6)
             tp_price = round(last_close - atr * TP_MULT, 6)
 
@@ -352,6 +368,13 @@ async def scan_symbol_tcp(exchange: ccxt_async.binance, config: dict) -> Optiona
             touched = last_low <= ema20 * (1 + TCP_ZONE_PCT) and last_close >= ema20 * (1 - TCP_ZONE_PCT)
             rsi_ok  = 40 <= rsi <= 55
             green   = last_close > last_open
+            if touched and rsi_ok and green and vol_ok:
+                if adx_val < settings.ADX_THRESHOLD:
+                    return {"symbol": symbol, "side": "long", "price": last_close,
+                            "sl_price": round(last_close - atr * TCP_SL_MULT, 6),
+                            "tp_price": round(last_close + atr * TCP_TP_MULT, 6),
+                            "candle_ts": candle_ts, "blocked_reason": f"adx_low|{adx_val:.1f}",
+                            "strategy": "tcp"}
             if touched and rsi_ok and green and vol_ok and adx_val >= settings.ADX_THRESHOLD:
                 sl_price = round(last_close - atr * TCP_SL_MULT, 6)
                 tp_price = round(last_close + atr * TCP_TP_MULT, 6)
@@ -386,6 +409,13 @@ async def scan_symbol_tcp(exchange: ccxt_async.binance, config: dict) -> Optiona
             touched = last_high >= ema20 * (1 - TCP_ZONE_PCT) and last_close <= ema20 * (1 + TCP_ZONE_PCT)
             rsi_ok  = 45 <= rsi <= 60
             red     = last_close < last_open
+            if touched and rsi_ok and red and vol_ok:
+                if adx_val < settings.ADX_THRESHOLD:
+                    return {"symbol": symbol, "side": "short", "price": last_close,
+                            "sl_price": round(last_close + atr * TCP_SL_MULT, 6),
+                            "tp_price": round(last_close - atr * TCP_TP_MULT, 6),
+                            "candle_ts": candle_ts, "blocked_reason": f"adx_low|{adx_val:.1f}",
+                            "strategy": "tcp"}
             if touched and rsi_ok and red and vol_ok and adx_val >= settings.ADX_THRESHOLD:
                 sl_price = round(last_close + atr * TCP_SL_MULT, 6)
                 tp_price = round(last_close - atr * TCP_TP_MULT, 6)
