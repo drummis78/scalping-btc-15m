@@ -775,10 +775,11 @@ async def dashboard():
                     <div style="font-size:10px;color:#444">Total &nbsp;|&nbsp; <b style="color:#ffa500">{cooldown_blocks_24h}</b> últimas 24h</div>
                 </div>
                 <div style="flex:1">
-                    <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Configuración</div>
-                    <div style="font-size:11px;color:#888">
+                    <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Configuración</div>
+                    <div style="font-size:12px;color:#888;line-height:1.8">
                         Activación: <b style="color:#aaa">{settings.COOLDOWN_LOSSES} pérdidas consecutivas</b><br>
                         Duración: <b style="color:#aaa">{settings.COOLDOWN_MINUTES} minutos</b>
+                        {"&nbsp;&nbsp;⏱ <b style='color:#ff5252;font-size:13px'>Restan " + str(cooldown_remaining_min) + " min</b> <span style='color:#555;font-size:10px'>(hasta " + cooldown_until_str + ")</span>" if cooldown_active else "&nbsp;&nbsp;<span style='color:#555;font-size:10px'>— sin cooldown activo</span>"}
                     </div>
                 </div>
             </div>
