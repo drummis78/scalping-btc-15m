@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     ATRPCT_FILTER_ENABLED:    bool  = True   # solo operar cuando ATR está en percentil alto
     ATRPCT_FILTER_THRESHOLD:  float = 60.0   # percentil mínimo (0-100)
     ATRPCT_FILTER_LEN:        int   = 100    # ventana rolling para min/max ATR
+    ADX_THRESHOLD:            float = 20.0   # ADX(14) mínimo — sin momentum el breakout revierte
 
     FUNDAMENTAL_ENABLED:       bool = True
     FUNDAMENTAL_POLL_INTERVAL: int  = 1800

@@ -17,7 +17,11 @@ logger = logging.getLogger("scalping_bot.scanner")
 
 # ── Universo de trading ───────────────────────────────────────────────────────
 TOP_N    = 50
-EXCLUDED = {"SHIB/USDT", "MATIC/USDT", "RNDR/USDT"}
+EXCLUDED = {
+    "SHIB/USDT", "MATIC/USDT", "RNDR/USDT",
+    # Commodities/forex — dinámicas distintas al crypto
+    "XAU/USDT", "XAG/USDT", "CL/USDT", "BZ/USDT",
+}
 
 # ── Parámetros fijos de estrategia ────────────────────────────────────────────
 LOOKBACK      = 30      # Donchian channel period (15m) — canal más largo, menos falsos breakouts
@@ -149,7 +153,7 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
             return None
         atr = float(df[atr_col[0]].iloc[-1])
 
-        # ATR Percentile filter: solo operar cuando volatilidad está en percentil alto
+        # ATR Percentile filter
         if settings.ATRPCT_FILTER_ENABLED:
             n = settings.ATRPCT_FILTER_LEN
             atr_series = df[atr_col[0]]
@@ -158,8 +162,12 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
             atr_pct = (atr_series - atr_lo) / (atr_hi - atr_lo + 1e-10) * 100
             cur_pct = float(atr_pct.iloc[-2])
             if pd.isna(cur_pct) or cur_pct < settings.ATRPCT_FILTER_THRESHOLD:
-                logger.debug(f"[ATRPCT] {symbol} skip: percentil={cur_pct:.1f} < {settings.ATRPCT_FILTER_THRESHOLD}")
                 return None
+
+        # ADX(14): confirma momentum direccional — sin ADX fuerte el breakout revierte
+        df.ta.adx(length=14, append=True)
+        adx_col = [c for c in df.columns if c.startswith("ADX_") and not c.startswith("ADX_D")]
+        adx_val = float(df[adx_col[0]].iloc[-2]) if adx_col and not pd.isna(df[adx_col[0]].iloc[-2]) else 0.0
 
         # Donchian con shift(1): el canal no incluye la vela actual
         df["upper"]   = df["high"].shift(1).rolling(window=LOOKBACK).max()
@@ -196,8 +204,8 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
             f"green={last_close>last_open}"
         )
 
-        # ── LONG: high supera DC upper, vela verde con cuerpo real ───────────
-        if last_high > upper and vol_ok and body_ok and last_close > last_open:
+        # ── LONG: high supera DC upper, vela verde con cuerpo real, ADX confirma ─
+        if last_high > upper and vol_ok and body_ok and last_close > last_open and adx_val >= settings.ADX_THRESHOLD:
             sl_price = round(last_close - atr * SL_MULT, 6)
             tp_price = round(last_close + atr * TP_MULT, 6)
 
@@ -235,8 +243,8 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
                 "candle_ts": candle_ts,
             }
 
-        # ── SHORT: low cae bajo DC lower, vela roja con cuerpo real ──────────
-        elif last_low < lower and vol_ok and body_ok and last_close < last_open:
+        # ── SHORT: low cae bajo DC lower, vela roja con cuerpo real, ADX confirma ─
+        elif last_low < lower and vol_ok and body_ok and last_close < last_open and adx_val >= settings.ADX_THRESHOLD:
             sl_price = round(last_close + atr * SL_MULT, 6)
             tp_price = round(last_close - atr * TP_MULT, 6)
 
@@ -318,8 +326,12 @@ async def scan_symbol_tcp(exchange: ccxt_async.binance, config: dict) -> Optiona
             atr_pct = (atr_series - atr_lo) / (atr_hi - atr_lo + 1e-10) * 100
             cur_pct = float(atr_pct.iloc[-2])
             if pd.isna(cur_pct) or cur_pct < settings.ATRPCT_FILTER_THRESHOLD:
-                logger.debug(f"[ATRPCT/TCP] {symbol} skip: percentil={cur_pct:.1f} < {settings.ATRPCT_FILTER_THRESHOLD}")
                 return None
+
+        # ADX filter
+        df.ta.adx(length=14, append=True)
+        adx_col = [c for c in df.columns if c.startswith("ADX_") and not c.startswith("ADX_D")]
+        adx_val = float(df[adx_col[0]].iloc[-2]) if adx_col and not pd.isna(df[adx_col[0]].iloc[-2]) else 0.0
 
         df.ta.rsi(length=14, append=True)
         rsi_col = [c for c in df.columns if c.startswith("RSI")]
@@ -349,7 +361,7 @@ async def scan_symbol_tcp(exchange: ccxt_async.binance, config: dict) -> Optiona
             touched = last_low <= ema20 * (1 + TCP_ZONE_PCT) and last_close >= ema20 * (1 - TCP_ZONE_PCT)
             rsi_ok  = 40 <= rsi <= 55
             green   = last_close > last_open
-            if touched and rsi_ok and green and vol_ok:
+            if touched and rsi_ok and green and vol_ok and adx_val >= settings.ADX_THRESHOLD:
                 sl_price = round(last_close - atr * TCP_SL_MULT, 6)
                 tp_price = round(last_close + atr * TCP_TP_MULT, 6)
                 regime = await _get_regime_1h(exchange, symbol)
@@ -383,7 +395,7 @@ async def scan_symbol_tcp(exchange: ccxt_async.binance, config: dict) -> Optiona
             touched = last_high >= ema20 * (1 - TCP_ZONE_PCT) and last_close <= ema20 * (1 + TCP_ZONE_PCT)
             rsi_ok  = 45 <= rsi <= 60
             red     = last_close < last_open
-            if touched and rsi_ok and red and vol_ok:
+            if touched and rsi_ok and red and vol_ok and adx_val >= settings.ADX_THRESHOLD:
                 sl_price = round(last_close + atr * TCP_SL_MULT, 6)
                 tp_price = round(last_close - atr * TCP_TP_MULT, 6)
                 regime = await _get_regime_1h(exchange, symbol)
