@@ -191,7 +191,8 @@ async def _process_signal(sig: dict):
             f"Score: `{_fund_impact:.1f}` | `{_fund_reason}`"
         )
         await log_signal(ts, symbol, side, price, sl_price, tp_price,
-                         False, _fund_reason, _fund_impact, "filtered_fundamental", "", strategy)
+                         False, _fund_reason, _fund_impact, "filtered_fundamental",
+                         json.dumps({"outcome": "pending", "blocked_reason": "filtered_fundamental"}), strategy)
         return
 
     # Ejecutar
@@ -493,7 +494,7 @@ async def dashboard():
                    SUM(CASE WHEN result_json LIKE '%would_win%'  THEN 1 ELSE 0 END) error,
                    SUM(CASE WHEN result_json LIKE '%pending%'    THEN 1 ELSE 0 END) pendiente
             FROM signal_log
-            WHERE verdict IN ('blocked_trend','blocked_funding','blocked_conflict')
+            WHERE verdict IN ('blocked_trend','blocked_funding','blocked_conflict','filtered_fundamental')
             GROUP BY verdict ORDER BY total DESC
         """)]
         filter_detail = [dict(r) for r in await conn.fetch("""
@@ -503,9 +504,30 @@ async def dashboard():
                    SUM(CASE WHEN result_json LIKE '%would_win%'  THEN 1 ELSE 0 END) error,
                    SUM(CASE WHEN result_json LIKE '%pending%'    THEN 1 ELSE 0 END) pendiente
             FROM signal_log
-            WHERE verdict IN ('blocked_trend','blocked_funding','blocked_conflict')
+            WHERE verdict IN ('blocked_trend','blocked_funding','blocked_conflict','filtered_fundamental')
             GROUP BY razon ORDER BY total DESC
         """)]
+        fund_status_row = await conn.fetchrow("""
+            SELECT title fg_label,
+                   (magnitude::numeric) fg_value,
+                   ts fg_ts
+            FROM fundamental_events WHERE category='sentiment' ORDER BY ts DESC LIMIT 1
+        """)
+        fund_news_24h = await conn.fetchval("""
+            SELECT COUNT(*) FROM fundamental_events
+            WHERE category='news' AND ts::timestamptz >= NOW() - INTERVAL '24 hours'
+        """) or 0
+        fund_last_news = await conn.fetchrow("""
+            SELECT title, impact, sentiment, ts FROM fundamental_events
+            WHERE category='news' ORDER BY ts DESC LIMIT 1
+        """)
+        fund_blocks_total = await conn.fetchval(
+            "SELECT COUNT(*) FROM signal_log WHERE verdict='filtered_fundamental'"
+        ) or 0
+        fund_blocks_24h = await conn.fetchval("""
+            SELECT COUNT(*) FROM signal_log
+            WHERE verdict='filtered_fundamental' AND ts::timestamptz >= NOW() - INTERVAL '24 hours'
+        """) or 0
 
     mode      = "PAPER" if settings.TESTNET else "REAL"
     pnl_d     = daily.get("realized_pnl", 0)
@@ -589,9 +611,10 @@ async def dashboard():
         </tr>""" for s in items) or "<tr><td colspan=7 style='color:#555;text-align:center;padding:20px'>Sin senales aun</td></tr>"
 
     _filter_labels = {
-        "blocked_trend":    "Tendencia / ADX",
-        "blocked_funding":  "Funding Rate",
-        "blocked_conflict": "Conflicto (pos. abierta)",
+        "blocked_trend":        "Tendencia / ADX",
+        "blocked_funding":      "Funding Rate",
+        "blocked_conflict":     "Conflicto (pos. abierta)",
+        "filtered_fundamental": "Filtro Fundamental (IA)",
     }
 
     def rows_filter_summary():
@@ -633,6 +656,75 @@ async def dashboard():
                 f"<td style='color:{eff_c};font-weight:bold'>{eff}%</td></tr>"
             )
         return "".join(rows)
+
+    def _build_fund_panel(fg_row, news_24h, last_news, blocks_total, blocks_24h):
+        fg_val   = float(fg_row["fg_value"]) if fg_row else None
+        fg_label = str(fg_row["fg_label"]) if fg_row else "—"
+        fg_ts    = str(fg_row["fg_ts"])[:16] if fg_row else "—"
+        if fg_val is None:
+            fg_color = "#555"
+            fg_text  = "Sin datos"
+        elif fg_val <= 25:
+            fg_color = "#ff5252"; fg_text = f"{fg_val:.0f} — Miedo Extremo"
+        elif fg_val <= 45:
+            fg_color = "#ffa500"; fg_text = f"{fg_val:.0f} — Miedo"
+        elif fg_val <= 55:
+            fg_color = "#aaa";    fg_text = f"{fg_val:.0f} — Neutral"
+        elif fg_val <= 75:
+            fg_color = "#00e676"; fg_text = f"{fg_val:.0f} — Codicia"
+        else:
+            fg_color = "#ff5252"; fg_text = f"{fg_val:.0f} — Codicia Extrema"
+
+        newsapi_ok = bool(settings.NEWSAPI_KEY)
+        groq_ok    = bool(settings.GROQ_API_KEY)
+        fund_on    = bool(settings.FUNDAMENTAL_ENABLED)
+
+        last_news_html = ""
+        if last_news:
+            imp = float(last_news["impact"] or 0)
+            imp_c = "#ff5252" if imp > 7 else ("#ffa500" if imp > 4 else "#00e676")
+            last_news_html = (
+                f'<div style="margin-top:10px;padding:8px 12px;background:#1a1a1a;border-radius:6px;font-size:11px">'
+                f'<span style="color:#555">Última noticia: </span>'
+                f'<b style="color:#e0e0e0">{str(last_news["title"] or "—")[:80]}</b>'
+                f' &nbsp;|&nbsp; <span style="color:{imp_c}">Impact: {imp:.1f}</span>'
+                f' &nbsp;|&nbsp; <span style="color:#555">{str(last_news["ts"] or "")[:16]}</span>'
+                f'</div>'
+            )
+
+        def pill(ok, yes_txt, no_txt):
+            c = "#00e676" if ok else "#ff5252"
+            t = yes_txt if ok else no_txt
+            return f'<span style="background:{c}22;color:{c};padding:2px 8px;border-radius:4px;font-size:10px;font-weight:bold">{t}</span>'
+
+        return f"""
+        <div style="background:#141414;border:1px solid #222;border-radius:10px;padding:14px 18px;margin-bottom:16px">
+            <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start">
+                <div>
+                    <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Fear &amp; Greed</div>
+                    <div style="font-size:20px;font-weight:bold;color:{fg_color}">{fg_text}</div>
+                    <div style="font-size:10px;color:#444;margin-top:2px">{fg_ts}</div>
+                </div>
+                <div>
+                    <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Servicios</div>
+                    <div style="display:flex;gap:6px;flex-wrap:wrap">
+                        {pill(fund_on,  "Filtro ON", "Filtro OFF")}
+                        {pill(newsapi_ok, "NewsAPI ✓", "NewsAPI ✗")}
+                        {pill(groq_ok,   "Groq IA ✓", "Groq IA ✗")}
+                    </div>
+                </div>
+                <div>
+                    <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Señales bloqueadas</div>
+                    <div style="font-size:18px;font-weight:bold;color:#ffa500">{blocks_total}</div>
+                    <div style="font-size:10px;color:#444">Total &nbsp;|&nbsp; <b style="color:#ffa500">{blocks_24h}</b> últimas 24h</div>
+                </div>
+                <div style="flex:1">
+                    <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Noticias procesadas (24h)</div>
+                    <div style="font-size:18px;font-weight:bold;color:#aaa">{news_24h}</div>
+                </div>
+            </div>
+            {last_news_html}
+        </div>"""
 
     html_out = f"""<!DOCTYPE html><html><head>
     <title>Scalping Bot</title>
@@ -717,6 +809,9 @@ async def dashboard():
     <h2>Bitacora de senales (ultimas 50)</h2>
     <table id="tbl-sig"><thead><tr><th>Hora</th><th>Estrategia</th><th>Simbolo</th><th>Lado</th><th>Precio</th><th>Veredicto</th><th>Razon</th></tr></thead>
     <tbody>{rows_signals(signals)}</tbody></table>
+
+    <h2>Filtro Fundamental (IA)</h2>
+    {_build_fund_panel(fund_status_row, fund_news_24h, fund_last_news, fund_blocks_total, fund_blocks_24h)}
 
     <h2>Efectividad de filtros</h2>
     <div style="font-size:11px;color:#555;margin-bottom:10px">
