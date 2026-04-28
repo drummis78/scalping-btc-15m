@@ -603,6 +603,16 @@ async def dashboard():
         </div>
     </div>
 
+    <div style="background:#141414;border:1px solid #222;border-radius:10px;padding:12px 18px;margin-bottom:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <span style="font-size:11px;color:#555;text-transform:uppercase;letter-spacing:1px">📈 Objetivo diario {settings.TARGET_DAILY_PCT:.0f}% — ${daily.get('target_usd', 0):.2f}</span>
+            <span style="font-size:13px;font-weight:bold;color:{'#00e676' if daily.get('reached') else ('#ffa500' if pnl_d>0 else '#ff5252')}">${pnl_d:+.2f} / ${daily.get('target_usd',0):.2f} ({daily.get('progress_pct',0):.1f}%) {"✅" if daily.get("reached") else ""}</span>
+        </div>
+        <div style="background:#1a1a1a;border-radius:6px;height:8px;overflow:hidden">
+            <div style="width:{min(max(daily.get('progress_pct',0),0),100):.1f}%;height:100%;background:{'#00e676' if daily.get('reached') else ('#ffa500' if pnl_d>0 else '#ff5252')};border-radius:6px"></div>
+        </div>
+    </div>
+
     <div class="stats">
         <div class="card"><div class="lbl">PnL hoy</div><div class="val {pnl_class}">${pnl_d:+.2f}</div></div>
         <div class="card"><div class="lbl">Posiciones abiertas</div><div class="val">{len(pos)}</div></div>
