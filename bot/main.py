@@ -619,11 +619,17 @@ async def dashboard():
     <h2>Rendimiento por estrategia</h2>
     <div class="scards">{strat_cards_html}</div>
 
-    <div class="tabs">
-        <button class="tab active" onclick="filterTab('all',this)">Todas</button>
-        <button class="tab" onclick="filterTab('donchian',this)" style="border-color:#00bcd444;color:#00bcd4">15m Donchian</button>
-        <button class="tab" onclick="filterTab('tcp',this)" style="border-color:#ff980044;color:#ff9800">TCP 15m</button>
-        <button class="tab" onclick="filterTab('donchian_1h',this)" style="border-color:#00e67644;color:#00e676">1H v2</button>
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:8px">
+        <div class="tabs" style="margin-bottom:0">
+            <button class="tab active" onclick="filterTab('all',this)">Todas</button>
+            <button class="tab" onclick="filterTab('donchian',this)" style="border-color:#00bcd444;color:#00bcd4">15m Donchian</button>
+            <button class="tab" onclick="filterTab('tcp',this)" style="border-color:#ff980044;color:#ff9800">TCP 15m</button>
+            <button class="tab" onclick="filterTab('donchian_1h',this)" style="border-color:#00e67644;color:#00e676">1H v2</button>
+        </div>
+        <div style="display:flex;gap:8px">
+            <button onclick="resetBot('15m')" style="padding:7px 14px;border-radius:8px;border:1px solid #ff525244;background:#ff52520d;color:#ff5252;cursor:pointer;font-size:11px;font-weight:bold">🗑 Reset 15m Bot</button>
+            <button onclick="resetBot('1h')"  style="padding:7px 14px;border-radius:8px;border:1px solid #ff980044;background:#ff98000d;color:#ff9800;cursor:pointer;font-size:11px;font-weight:bold">🗑 Reset 1H Bot</button>
+        </div>
     </div>
 
     <h2>Posiciones abiertas ({len(pos)})</h2>
@@ -653,6 +659,14 @@ async def dashboard():
                 else row.classList.add('hidden');
             }});
         }});
+    }}
+    function resetBot(group) {{
+        const label = group === '15m' ? '15m Bot (Donchian + TCP)' : '1H v2 Bot';
+        if (!confirm('⚠️ Resetear ' + label + '?\nSe borrarán posiciones, trades y señales de este bot.')) return;
+        fetch('/admin/reset_strategy?group=' + group + '&confirm=RESET', {{method:'POST'}})
+            .then(r => r.json())
+            .then(d => {{ alert('✅ Reset OK — ' + d.closed + ' posición(es) cerrada(s)'); location.reload(); }})
+            .catch(e => alert('❌ Error: ' + e));
     }}
     setTimeout(() => location.reload(), 60000);
     </script>
@@ -937,18 +951,16 @@ async def api_analytics():
 
 @app.post("/admin/reset")
 async def api_reset(confirm: str = Query(default="")):
-    """Cierra posiciones en el exchange y limpia todas las tablas. Requiere ?confirm=RESET"""
+    """Resetea TODOS los bots. Requiere ?confirm=RESET"""
     if confirm != "RESET":
         raise HTTPException(status_code=403, detail="Forbidden: pass ?confirm=RESET")
 
-    # Cerrar posiciones en el exchange
     close_results = []
     try:
         close_results = await binance_exchange.emergency_close_all()
     except Exception as e:
         logger.warning(f"[RESET] Error cerrando posiciones: {e}")
 
-    # Limpiar todas las tablas operativas
     async with get_pool().acquire() as conn:
         await conn.execute("DELETE FROM positions")
         await conn.execute("DELETE FROM trades")
@@ -958,25 +970,40 @@ async def api_reset(confirm: str = Query(default="")):
         await conn.execute("DELETE FROM account_state")
 
     logger.warning("[RESET] Base de datos limpiada por solicitud manual")
-    return {
-        "ok": True,
-        "exchange_closes": close_results,
-        "message": "DB limpiada. Posiciones, trades y señales borrados.",
-    }
+    return {"ok": True, "exchange_closes": close_results}
 
 
-@app.post("/admin/reset")
-async def admin_reset(x_secret: str = Header(default="", alias="X-Secret")):
-    if settings.WEBHOOK_SECRET and x_secret != settings.WEBHOOK_SECRET:
-        raise HTTPException(status_code=403, detail="Forbidden")
-    import aiosqlite
-    async with aiosqlite.connect(settings.DATABASE_PATH) as db:
-        await db.execute("DELETE FROM positions")
-        await db.execute("DELETE FROM trades")
-        await db.execute("DELETE FROM daily_stats")
-        await db.commit()
-    logger.info("DB reset via /admin/reset")
-    return {"status": "reset_ok"}
+@app.post("/admin/reset_strategy")
+async def reset_strategy(group: str = Query(default=""), confirm: str = Query(default="")):
+    """Resetea solo un bot. group=15m resetea donchian+tcp, group=1h resetea donchian_1h."""
+    if confirm != "RESET":
+        raise HTTPException(status_code=403, detail="Forbidden: pass ?confirm=RESET")
+    if group not in ("15m", "1h"):
+        raise HTTPException(status_code=400, detail="group must be '15m' or '1h'")
+
+    strategies = ["donchian", "tcp"] if group == "15m" else ["donchian_1h"]
+
+    positions = [p for p in await get_all_positions() if p.get("strategy") in strategies]
+    for pos in positions:
+        price = await binance_exchange.get_price(pos["symbol"]) or pos["entry_price"]
+        await binance_exchange.close_position(
+            pos["symbol"], pos["side"], price, "reset_strategy",
+            strategy=pos.get("strategy")
+        )
+
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "DELETE FROM positions WHERE strategy = ANY($1::text[])", strategies
+        )
+        await conn.execute(
+            "DELETE FROM trades WHERE strategy = ANY($1::text[])", strategies
+        )
+        await conn.execute(
+            "DELETE FROM signal_log WHERE strategy = ANY($1::text[])", strategies
+        )
+
+    logger.warning(f"[RESET-STRATEGY] group={group} strategies={strategies}")
+    return {"ok": True, "group": group, "strategies": strategies, "closed": len(positions)}
 
 
 if __name__ == "__main__":
