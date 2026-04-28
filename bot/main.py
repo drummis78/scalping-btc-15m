@@ -486,6 +486,26 @@ async def dashboard():
                    SUM(CASE WHEN close_reason='sl_hit' THEN 1 ELSE 0 END) sl_hits
             FROM trades GROUP BY strategy ORDER BY strategy
         """)]
+        filter_summary = [dict(r) for r in await conn.fetch("""
+            SELECT verdict,
+                   COUNT(*) total,
+                   SUM(CASE WHEN result_json LIKE '%would_lose%' THEN 1 ELSE 0 END) correcto,
+                   SUM(CASE WHEN result_json LIKE '%would_win%'  THEN 1 ELSE 0 END) error,
+                   SUM(CASE WHEN result_json LIKE '%pending%'    THEN 1 ELSE 0 END) pendiente
+            FROM signal_log
+            WHERE verdict IN ('blocked_trend','blocked_funding','blocked_conflict')
+            GROUP BY verdict ORDER BY total DESC
+        """)]
+        filter_detail = [dict(r) for r in await conn.fetch("""
+            SELECT SPLIT_PART(fund_reason, '|', 1) razon,
+                   COUNT(*) total,
+                   SUM(CASE WHEN result_json LIKE '%would_lose%' THEN 1 ELSE 0 END) correcto,
+                   SUM(CASE WHEN result_json LIKE '%would_win%'  THEN 1 ELSE 0 END) error,
+                   SUM(CASE WHEN result_json LIKE '%pending%'    THEN 1 ELSE 0 END) pendiente
+            FROM signal_log
+            WHERE verdict IN ('blocked_trend','blocked_funding','blocked_conflict')
+            GROUP BY razon ORDER BY total DESC
+        """)]
 
     mode      = "PAPER" if settings.TESTNET else "REAL"
     pnl_d     = daily.get("realized_pnl", 0)
@@ -567,6 +587,52 @@ async def dashboard():
             <td style="color:{'#00e676' if s.get('verdict')=='executed' else '#ffa500'}">{(s.get('verdict') or '').replace('_',' ').upper()}</td>
             <td style="font-size:10px;color:#888">{(s.get('fund_reason') or '')[:50]}</td>
         </tr>""" for s in items) or "<tr><td colspan=7 style='color:#555;text-align:center;padding:20px'>Sin senales aun</td></tr>"
+
+    _filter_labels = {
+        "blocked_trend":    "Tendencia / ADX",
+        "blocked_funding":  "Funding Rate",
+        "blocked_conflict": "Conflicto (pos. abierta)",
+    }
+
+    def rows_filter_summary():
+        if not filter_summary:
+            return "<tr><td colspan=6 style='color:#555;text-align:center;padding:16px'>Sin datos aún</td></tr>"
+        rows = []
+        for r in filter_summary:
+            t = int(r["total"]); c = int(r["correcto"]); e = int(r["error"]); p = int(r["pendiente"])
+            resolved = c + e
+            eff = round(c / resolved * 100, 1) if resolved else 0
+            eff_c = "#00e676" if eff >= 55 else ("#ffa500" if eff >= 45 else "#ff5252")
+            label = _filter_labels.get(r["verdict"], r["verdict"])
+            rows.append(
+                f"<tr><td><b>{label}</b></td>"
+                f"<td style='color:#aaa'>{t}</td>"
+                f"<td style='color:#00e676'>{c}</td>"
+                f"<td style='color:#ff5252'>{e}</td>"
+                f"<td style='color:#555'>{p}</td>"
+                f"<td style='color:{eff_c};font-weight:bold'>{eff}%</td></tr>"
+            )
+        return "".join(rows)
+
+    def rows_filter_detail():
+        if not filter_detail:
+            return "<tr><td colspan=6 style='color:#555;text-align:center;padding:16px'>Sin datos aún</td></tr>"
+        rows = []
+        for r in filter_detail:
+            t = int(r["total"]); c = int(r["correcto"]); e = int(r["error"]); p = int(r["pendiente"])
+            resolved = c + e
+            eff = round(c / resolved * 100, 1) if resolved else 0
+            eff_c = "#00e676" if eff >= 55 else ("#ffa500" if eff >= 45 else "#ff5252")
+            razon = (r["razon"] or "—").replace("_", " ")
+            rows.append(
+                f"<tr><td><b>{razon}</b></td>"
+                f"<td style='color:#aaa'>{t}</td>"
+                f"<td style='color:#00e676'>{c}</td>"
+                f"<td style='color:#ff5252'>{e}</td>"
+                f"<td style='color:#555'>{p}</td>"
+                f"<td style='color:{eff_c};font-weight:bold'>{eff}%</td></tr>"
+            )
+        return "".join(rows)
 
     html_out = f"""<!DOCTYPE html><html><head>
     <title>Scalping Bot</title>
@@ -651,6 +717,31 @@ async def dashboard():
     <h2>Bitacora de senales (ultimas 50)</h2>
     <table id="tbl-sig"><thead><tr><th>Hora</th><th>Estrategia</th><th>Simbolo</th><th>Lado</th><th>Precio</th><th>Veredicto</th><th>Razon</th></tr></thead>
     <tbody>{rows_signals(signals)}</tbody></table>
+
+    <h2>Efectividad de filtros</h2>
+    <div style="font-size:11px;color:#555;margin-bottom:10px">
+        <b style="color:#00e676">Correcto</b> = hubiera perdido (filtro acertó) &nbsp;|&nbsp;
+        <b style="color:#ff5252">Error</b> = hubiera ganado (filtro bloqueó una ganancia) &nbsp;|&nbsp;
+        Efectividad = Correcto / (Correcto + Error)
+    </div>
+    <table><thead><tr>
+        <th>Filtro</th><th>Bloqueadas</th>
+        <th style="color:#00e676">Correcto ✓</th>
+        <th style="color:#ff5252">Error ✗</th>
+        <th>Pendiente</th>
+        <th>Efectividad</th>
+    </tr></thead>
+    <tbody>{rows_filter_summary()}</tbody></table>
+
+    <h2>Desglose por razón de filtro</h2>
+    <table><thead><tr>
+        <th>Razón</th><th>Bloqueadas</th>
+        <th style="color:#00e676">Correcto ✓</th>
+        <th style="color:#ff5252">Error ✗</th>
+        <th>Pendiente</th>
+        <th>Efectividad</th>
+    </tr></thead>
+    <tbody>{rows_filter_detail()}</tbody></table>
 
     <div class="refresh-note">Auto-refresh cada 60s</div>
     </div>
