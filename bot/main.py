@@ -1139,7 +1139,7 @@ async def dashboard():
         }});
     }}
     function resetBalance() {{
-        _showModal('↺ Reset Balance', 'Resetea el balance a ${settings.PAPER_BALANCE:.0f}.\nNo borra posiciones ni trades.', 'Resetear', '#00bcd4', function(secret) {{
+        _showModal('↺ Reset Balance', 'Resetea el balance a ${settings.PAPER_BALANCE:.0f}.\\nNo borra posiciones ni trades.', 'Resetear', '#00bcd4', function(secret) {{
             fetch('/admin/reset_balance', {{method:'POST',headers:{{'X-Secret':secret}}}})
                 .then(r=>{{ if(!r.ok) throw new Error('Error '+r.status+' — verificá el secret'); return r.json(); }})
                 .then(d=>_toast('✅ Balance → $'+d.balance, true))
@@ -1147,7 +1147,7 @@ async def dashboard():
         }});
     }}
     function resetDB() {{
-        _showModal('🗑 Reset DB COMPLETO', 'Se borrarán TODOS los datos:\nposiciones, trades, señales y balance.', 'Borrar todo', '#ff5252', function(secret) {{
+        _showModal('🗑 Reset DB COMPLETO', 'Se borrarán TODOS los datos:\\nposiciones, trades, señales y balance.', 'Borrar todo', '#ff5252', function(secret) {{
             fetch('/admin/reset?confirm=RESET', {{method:'POST',headers:{{'X-Secret':secret}}}})
                 .then(r=>{{ if(!r.ok) throw new Error('Error '+r.status+' — verificá el secret'); return r.json(); }})
                 .then(()=>_toast('✅ DB limpiada', true))
