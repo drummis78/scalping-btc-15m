@@ -13,6 +13,12 @@ class TelegramNotifier:
         self.app = ApplicationBuilder().token(settings.TELEGRAM_BOT_TOKEN).build() \
             if settings.TELEGRAM_BOT_TOKEN else None
 
+    def _is_authorized(self, update: Update) -> bool:
+        """Solo el chat configurado en TELEGRAM_CHAT_ID puede usar comandos."""
+        if not settings.TELEGRAM_CHAT_ID:
+            return True
+        return str(update.effective_chat.id) == str(settings.TELEGRAM_CHAT_ID)
+
     def _setup_handlers(self):
         if not self.app:
             return
@@ -52,6 +58,8 @@ class TelegramNotifier:
             logger.error(f"Telegram send failed: {e}")
 
     async def status_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
         positions = await get_all_positions()
         total_pnl = await get_total_pnl()
         daily = await get_today_stats()
@@ -88,6 +96,8 @@ class TelegramNotifier:
         await update.message.reply_text(msg, parse_mode="Markdown")
 
     async def daily_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
         daily = await get_today_stats()
         if not daily:
             await update.message.reply_text("Sin datos para hoy.")
@@ -101,6 +111,8 @@ class TelegramNotifier:
         await update.message.reply_text(msg, parse_mode="Markdown")
 
     async def close_all_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
         if not self.exchange:
             await update.message.reply_text("❌ Exchange no inicializado")
             return

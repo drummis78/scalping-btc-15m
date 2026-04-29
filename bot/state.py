@@ -219,18 +219,19 @@ async def remove_position(exchange: str, symbol: str, side: str,
     pnl_usd = (exit_price - pos["entry_price"]) * sign * pos["qty"] * pos["leverage"]
     strat   = pos.get("strategy") or "donchian"
     async with get_pool().acquire() as conn:
-        await conn.execute("""
-            INSERT INTO trades
-            (exchange, symbol, side, entry_price, exit_price, qty, leverage, pnl,
-             close_reason, open_time, close_time, strategy)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-        """, exchange, symbol, side, pos["entry_price"], exit_price, pos["qty"],
-             pos["leverage"], pnl_usd, close_reason, pos["open_time"],
-             datetime.now(timezone.utc).isoformat(), strat)
-        await conn.execute(
-            "DELETE FROM positions WHERE exchange=$1 AND symbol=$2 AND side=$3 AND strategy=$4",
-            exchange, symbol, side, strat
-        )
+        async with conn.transaction():
+            await conn.execute("""
+                INSERT INTO trades
+                (exchange, symbol, side, entry_price, exit_price, qty, leverage, pnl,
+                 close_reason, open_time, close_time, strategy)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+            """, exchange, symbol, side, pos["entry_price"], exit_price, pos["qty"],
+                 pos["leverage"], pnl_usd, close_reason, pos["open_time"],
+                 datetime.now(timezone.utc).isoformat(), strat)
+            await conn.execute(
+                "DELETE FROM positions WHERE exchange=$1 AND symbol=$2 AND side=$3 AND strategy=$4",
+                exchange, symbol, side, strat
+            )
     return pnl_usd
 
 

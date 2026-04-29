@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHAT_ID:   str = ""
 
-    WEBHOOK_SECRET:     str = "cambiar_antes_de_produccion"
+    WEBHOOK_SECRET:     str = ""
     TESTNET:            bool = True
 
     MAX_LEVERAGE:         float = 3.0

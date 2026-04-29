@@ -320,7 +320,7 @@ class BinanceExchange:
                 return await fn(*args, **kwargs)
             except (ccxt_async.RateLimitExceeded, ccxt_async.NetworkError) as e:
                 last_exc = e
-                logger.warning(f"[RETRY] attempt={attempt+1} error={e}")
+                logger.warning(f"[RETRY] attempt={attempt+1} error={type(e).__name__}")
             except ccxt_async.RequestTimeout as e:
                 last_exc = e
                 # Timeout ≠ orden fallida — esperar y verificar posición abierta en exchange

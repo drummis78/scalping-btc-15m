@@ -1,11 +1,13 @@
 import asyncio
+import base64
 import json
 import logging
 import os
+import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI, Request, HTTPException, Query, Header
+from fastapi import FastAPI, Request, HTTPException, Query, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -279,6 +281,15 @@ async def _position_monitor():
                     result = await binance_exchange.close_position(symbol, side, close_price, reason,
                                                                    strategy=strat)
                     if result["status"] == "success":
+                        # Verificar que la posición fue eliminada de DB (guard contra inconsistencia)
+                        still_open = await get_position("binance", symbol, side, strat)
+                        if still_open:
+                            logger.warning(f"[MONITOR] {symbol} {side} sigue en DB tras cierre exitoso — forzando limpieza")
+                            async with get_pool().acquire() as conn:
+                                await conn.execute(
+                                    "DELETE FROM positions WHERE exchange='binance' AND symbol=$1 AND side=$2 AND strategy=$3",
+                                    symbol, side, strat
+                                )
                         pnl  = result.get("pnl", 0)
                         icon = "✅" if tp_hit else "🛑"
                         label = "TP ALCANZADO" if tp_hit else "SL TOCADO"
@@ -408,6 +419,8 @@ async def lifespan(app: FastAPI):
     db_url = settings.DATABASE_URL
     masked = db_url[:30] + "..." if len(db_url) > 30 else repr(db_url)
     logger.info(f"[STARTUP] DATABASE_URL = {masked}")
+    if not settings.WEBHOOK_SECRET:
+        logger.warning("[SECURITY] WEBHOOK_SECRET no configurado — dashboard y APIs sin autenticacion. Configurar antes de produccion.")
     await init_db()
     await ensure_daily_stats()
 
@@ -458,15 +471,36 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 @app.middleware("http")
-async def allow_iframe(request: Request, call_next):
+async def security_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Frame-Options"] = "ALLOWALL"
+    response.headers["X-Content-Type-Options"] = "nosniff"
     return response
 
 
 def _check_secret(x_secret: str = Header(default="", alias="X-Secret")):
-    if settings.WEBHOOK_SECRET and x_secret != settings.WEBHOOK_SECRET:
+    if settings.WEBHOOK_SECRET and not secrets.compare_digest(x_secret, settings.WEBHOOK_SECRET):
         raise HTTPException(status_code=403, detail="Forbidden")
+
+
+def _check_basic_auth(authorization: str = Header(default="", alias="Authorization")):
+    """Basic Auth para el dashboard — usa WEBHOOK_SECRET como contraseña (usuario: admin)."""
+    if not settings.WEBHOOK_SECRET:
+        return  # sin secreto configurado, acceso libre (modo dev)
+    valid = False
+    if authorization.startswith("Basic "):
+        try:
+            decoded = base64.b64decode(authorization[6:]).decode("utf-8", errors="replace")
+            _, _, password = decoded.partition(":")
+            valid = secrets.compare_digest(password, settings.WEBHOOK_SECRET)
+        except Exception:
+            pass
+    if not valid:
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized",
+            headers={"WWW-Authenticate": 'Basic realm="Scalping Bot"'},
+        )
 
 
 @app.get("/health")
@@ -935,6 +969,7 @@ async def dashboard():
         <div style="text-align:right">
             <div class="lbl">Balance</div>
             <div class="val">${bal:,.2f}</div>
+            <button onclick="resetBalance()" style="margin-top:4px;padding:3px 8px;border-radius:6px;border:1px solid #00bcd444;background:#00bcd40d;color:#00bcd4;cursor:pointer;font-size:10px">↺ ${settings.PAPER_BALANCE:.0f}</button>
         </div>
     </div>
 
@@ -1048,12 +1083,36 @@ async def dashboard():
             }});
         }});
     }}
+    const _hasSecret = {'true' if settings.WEBHOOK_SECRET else 'false'};
     function resetBot(group) {{
         const label = group === '15m' ? '15m Bot (Donchian + TCP)' : '1H v2 Bot';
         if (!confirm('⚠️ Resetear ' + label + '?\nSe borrarán posiciones, trades y señales de este bot.')) return;
-        fetch('/admin/reset_strategy?group=' + group + '&confirm=RESET', {{method:'POST'}})
-            .then(r => r.json())
+        let secret = '';
+        if (_hasSecret) {{
+            secret = prompt('🔑 Ingresá el WEBHOOK_SECRET para confirmar:');
+            if (secret === null) return;
+        }}
+        fetch('/admin/reset_strategy?group=' + group + '&confirm=RESET', {{
+            method: 'POST',
+            headers: {{'X-Secret': secret}}
+        }})
+            .then(r => {{ if (!r.ok) throw new Error('Error ' + r.status + ' — verificá el secret'); return r.json(); }})
             .then(d => {{ alert('✅ Reset OK — ' + d.closed + ' posición(es) cerrada(s)'); location.reload(); }})
+            .catch(e => alert('❌ Error: ' + e));
+    }}
+    function resetBalance() {{
+        if (!confirm('↺ Resetear balance a ${settings.PAPER_BALANCE:.0f}?\nNo borra posiciones ni trades.')) return;
+        let secret = '';
+        if (_hasSecret) {{
+            secret = prompt('🔑 Ingresá el WEBHOOK_SECRET para confirmar:');
+            if (secret === null) return;
+        }}
+        fetch('/admin/reset_balance', {{
+            method: 'POST',
+            headers: {{'X-Secret': secret}}
+        }})
+            .then(r => {{ if (!r.ok) throw new Error('Error ' + r.status + ' — verificá el secret'); return r.json(); }})
+            .then(d => {{ alert('✅ Balance reseteado a $' + d.balance); location.reload(); }})
             .catch(e => alert('❌ Error: ' + e));
     }}
     setTimeout(() => location.reload(), 60000);
@@ -1064,13 +1123,14 @@ async def dashboard():
 
 @app.get("/api/positions")
 @limiter.limit("30/minute")
-async def api_positions(request: Request):
+async def api_positions(request: Request, _: None = Depends(_check_secret)):
     return [dict(p) for p in await get_all_positions()]
 
 
 @app.get("/api/trades")
 @limiter.limit("30/minute")
-async def api_trades(request: Request, limit: int = Query(default=100)):
+async def api_trades(request: Request, limit: int = Query(default=100, le=500),
+                     _: None = Depends(_check_secret)):
     async with get_pool().acquire() as conn:
         rows = await conn.fetch("SELECT * FROM trades ORDER BY id DESC LIMIT $1", limit)
     return [dict(r) for r in rows]
@@ -1078,7 +1138,7 @@ async def api_trades(request: Request, limit: int = Query(default=100)):
 
 @app.get("/api/stats")
 @limiter.limit("30/minute")
-async def api_stats(request: Request):
+async def api_stats(request: Request, _: None = Depends(_check_secret)):
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             "SELECT COUNT(*) total, COALESCE(SUM(pnl),0) total_pnl, "
@@ -1100,7 +1160,7 @@ async def api_stats(request: Request):
 
 
 @app.get("/api/daily")
-async def api_daily():
+async def api_daily(_: None = Depends(_check_secret)):
     async with get_pool().acquire() as conn:
         rows = await conn.fetch("SELECT * FROM daily_stats ORDER BY date DESC LIMIT 30")
     today = await get_today_stats()
@@ -1108,12 +1168,12 @@ async def api_daily():
 
 
 @app.get("/api/audit")
-async def api_audit(limit: int = Query(default=200)):
+async def api_audit(limit: int = Query(default=200, le=1000), _: None = Depends(_check_secret)):
     return await get_signal_log(limit=limit)
 
 
 @app.get("/api/fundamental")
-async def api_fundamental():
+async def api_fundamental(_: None = Depends(_check_secret)):
     from bot.fundamental import fundamental_filter
     fg = fundamental_filter._last_fear_greed
     async with get_pool().acquire() as conn:
@@ -1144,7 +1204,7 @@ async def api_fundamental():
 
 
 @app.get("/api/analytics")
-async def api_analytics():
+async def api_analytics(_: None = Depends(_check_secret)):
     async with get_pool().acquire() as conn:
         # Performance por símbolo (trades ejecutados)
         sym_rows = await conn.fetch("""
@@ -1338,8 +1398,8 @@ async def api_analytics():
 
 
 @app.post("/admin/reset")
-async def api_reset(confirm: str = Query(default="")):
-    """Resetea TODOS los bots. Requiere ?confirm=RESET"""
+async def api_reset(confirm: str = Query(default=""), _: None = Depends(_check_secret)):
+    """Resetea TODOS los bots. Requiere ?confirm=RESET + header X-Secret."""
     if confirm != "RESET":
         raise HTTPException(status_code=403, detail="Forbidden: pass ?confirm=RESET")
 
@@ -1361,8 +1421,17 @@ async def api_reset(confirm: str = Query(default="")):
     return {"ok": True, "exchange_closes": close_results}
 
 
+@app.post("/admin/reset_balance")
+async def reset_balance(_: None = Depends(_check_secret)):
+    """Resetea solo el balance a PAPER_BALANCE, sin tocar trades ni posiciones."""
+    from bot.state import save_paper_balance
+    await save_paper_balance(settings.PAPER_BALANCE)
+    return {"ok": True, "balance": settings.PAPER_BALANCE}
+
+
 @app.post("/admin/reset_strategy")
-async def reset_strategy(group: str = Query(default=""), confirm: str = Query(default="")):
+async def reset_strategy(group: str = Query(default=""), confirm: str = Query(default=""),
+                         _: None = Depends(_check_secret)):
     """Resetea solo un bot. group=15m resetea donchian+tcp, group=1h resetea donchian_1h."""
     if confirm != "RESET":
         raise HTTPException(status_code=403, detail="Forbidden: pass ?confirm=RESET")
