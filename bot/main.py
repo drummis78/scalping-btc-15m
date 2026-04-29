@@ -690,7 +690,19 @@ async def dashboard():
         </tr>""" for t in items)
 
     def rows_signals(items):
-        return "".join(f"""<tr data-strat="{s.get('strategy','')}">
+        def _outcome_badge(s):
+            verdict = s.get('verdict', '')
+            rj = s.get('result_json') or ''
+            if verdict == 'executed':
+                return ''
+            if 'would_lose' in rj:
+                return '<span style="color:#00e676;font-size:11px" title="Filtro acertó — hubiera perdido">✓ Correcto</span>'
+            if 'would_win' in rj:
+                return '<span style="color:#ff5252;font-size:11px" title="Filtro erró — hubiera ganado">✗ Error</span>'
+            return '<span style="color:#555;font-size:11px">⏳ Pendiente</span>'
+        rows = []
+        for s in items:
+            rows.append(f"""<tr data-strat="{s.get('strategy','')}">
             <td>{str(s.get('ts',''))[:16]}</td>
             <td>{badge(s.get('strategy',''))}</td>
             <td><b>{s.get('symbol','')}</b></td>
@@ -698,7 +710,9 @@ async def dashboard():
             <td>${(s.get('price') or 0):,.4f}</td>
             <td style="color:{'#00e676' if s.get('verdict')=='executed' else '#ffa500'}">{(s.get('verdict') or '').replace('_',' ').upper()}</td>
             <td style="font-size:10px;color:#888">{(s.get('fund_reason') or '')[:50]}</td>
-        </tr>""" for s in items) or "<tr><td colspan=7 style='color:#555;text-align:center;padding:20px'>Sin senales aun</td></tr>"
+            <td>{_outcome_badge(s)}</td>
+        </tr>""")
+        return "".join(rows) or "<tr><td colspan=8 style='color:#555;text-align:center;padding:20px'>Sin senales aun</td></tr>"
 
     _filter_labels = {
         "blocked_trend":        "Tendencia / ADX",
@@ -1023,7 +1037,7 @@ async def dashboard():
     <tbody>{rows_trades(trades)}</tbody></table>
 
     <h2>Bitacora de senales (ultimas 50)</h2>
-    <table id="tbl-sig"><thead><tr><th>Hora</th><th>Estrategia</th><th>Simbolo</th><th>Lado</th><th>Precio</th><th>Veredicto</th><th>Razon</th></tr></thead>
+    <table id="tbl-sig"><thead><tr><th>Hora</th><th>Estrategia</th><th>Simbolo</th><th>Lado</th><th>Precio</th><th>Veredicto</th><th>Razon</th><th>Resultado Filtro</th></tr></thead>
     <tbody>{rows_signals(signals)}</tbody></table>
 
     <h2>Cooldown — Racha de pérdidas</h2>
