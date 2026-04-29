@@ -523,10 +523,12 @@ async def dashboard():
         strat_rows = [dict(r) for r in await conn.fetch("""
             SELECT strategy,
                    COUNT(*) trades,
-                   SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) wins,
+                   SUM(CASE WHEN close_reason='tp_hit' THEN 1 ELSE 0 END) wins,
+                   SUM(CASE WHEN close_reason='sl_hit' AND pnl<0  THEN 1 ELSE 0 END) losses,
+                   SUM(CASE WHEN close_reason='sl_hit' AND pnl>=0 THEN 1 ELSE 0 END) be_hits,
                    ROUND(SUM(pnl)::numeric,2) total_pnl,
                    SUM(CASE WHEN close_reason='tp_hit' THEN 1 ELSE 0 END) tp_hits,
-                   SUM(CASE WHEN close_reason='sl_hit' THEN 1 ELSE 0 END) sl_hits
+                   SUM(CASE WHEN close_reason='sl_hit' AND pnl<0  THEN 1 ELSE 0 END) sl_hits
             FROM trades GROUP BY strategy ORDER BY strategy
         """)]
         chop_analysis = [dict(r) for r in await conn.fetch("""
@@ -627,14 +629,14 @@ async def dashboard():
         return f'<span style="background:{c}22;color:{c};padding:2px 7px;border-radius:4px;font-size:10px;font-weight:bold">{lbl}</span>'
 
     def strat_card(s):
-        r = strat_by_key.get(s["key"])
-        t  = int(r["trades"])  if r else 0
-        w  = int(r["wins"])    if r else 0
-        tp = int(r["tp_hits"]) if r else 0
-        sl = int(r["sl_hits"]) if r else 0
+        r   = strat_by_key.get(s["key"])
+        t   = int(r["trades"])   if r else 0
+        w   = int(r["wins"])     if r else 0
+        be  = int(r["be_hits"])  if r else 0
+        lo  = int(r["losses"])   if r else 0
         pnl = float(r["total_pnl"] or 0) if r else 0.0
-        wr  = w / t * 100 if t else 0
-        wr_color = "#00e676" if wr >= 40 else ("#ffa500" if wr >= 30 else "#ff5252")
+        wr  = w / (w + lo) * 100 if (w + lo) else 0
+        wr_color  = "#00e676" if wr >= 40 else ("#ffa500" if wr >= 30 else "#ff5252")
         pnl_color = "#00e676" if pnl >= 0 else "#ff5252"
         c = s["color"]
         return f"""
@@ -643,11 +645,13 @@ async def dashboard():
                 <span style="color:{c};font-weight:bold;font-size:13px">{s['label']}</span>
                 <span style="color:#555;font-size:10px">{s['sym']} simbolos</span>
             </div>
-            <div style="display:flex;gap:20px">
+            <div style="display:flex;gap:16px;flex-wrap:wrap">
                 <div><div class="sval">{t}</div><div class="slbl">trades</div></div>
                 <div><div class="sval" style="color:{wr_color}">{wr:.1f}%</div><div class="slbl">WR</div></div>
                 <div><div class="sval" style="color:{pnl_color}">${pnl:+.2f}</div><div class="slbl">PnL</div></div>
-                <div><div class="sval" style="color:#888">{tp}/{sl}</div><div class="slbl">TP/SL</div></div>
+                <div><div class="sval" style="color:#00e676">{w}</div><div class="slbl">wins</div></div>
+                <div><div class="sval" style="color:#ffd740">{be}</div><div class="slbl">BE</div></div>
+                <div><div class="sval" style="color:#ff5252">{lo}</div><div class="slbl">losses</div></div>
             </div>
         </div>"""
 
@@ -678,16 +682,25 @@ async def dashboard():
     def rows_trades(items):
         if not items:
             return "<tr><td colspan=8 style='color:#555;text-align:center;padding:20px'>Sin historial</td></tr>"
-        return "".join(f"""<tr data-strat="{t.get('strategy','')}">
+        def _trade_row(t):
+            cr  = t.get('close_reason', '')
+            pnl = t['pnl'] or 0
+            is_tp = cr == 'tp_hit'
+            is_be = cr == 'sl_hit' and pnl >= 0
+            cr_color  = "#00e676" if is_tp else ("#ffd740" if is_be else "#ff5252")
+            pnl_color = "#00e676" if is_tp else ("#ffd740" if is_be else "#ff5252")
+            cr_label  = ("TP HIT" if is_tp else ("BE" if is_be else "SL HIT"))
+            return f"""<tr data-strat="{t.get('strategy','')}">
             <td>{badge(t.get('strategy',''))}</td>
             <td><b>{t['symbol']}</b></td>
             <td style="color:{'#00e676' if t['side']=='long' else '#ff5252'}">{t['side'].upper()}</td>
             <td>${t['entry_price']:,.4f}</td>
             <td>${t['exit_price']:,.4f}</td>
-            <td style="color:{'#00e676' if (t['pnl'] or 0)>=0 else '#ff5252'}">${(t['pnl'] or 0):+.2f}</td>
-            <td style="color:{'#00e676' if t.get('close_reason')=='tp_hit' else '#ff5252'}">{t.get('close_reason','').replace('_',' ').upper()}</td>
+            <td style="color:{pnl_color}">${pnl:+.2f}</td>
+            <td style="color:{cr_color}">{cr_label}</td>
             <td>{str(t.get('close_time',''))[:16]}</td>
-        </tr>""" for t in items)
+        </tr>"""
+        return "".join(_trade_row(t) for t in items)
 
     def rows_signals(items):
         def _outcome_badge(s):

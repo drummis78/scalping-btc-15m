@@ -229,7 +229,7 @@ class BinanceExchange:
         margin     = pos["entry_price"] * pos["qty"] / pos["leverage"]
         balance    = await get_paper_balance()
         await save_paper_balance(balance + margin + pnl - commission)
-        await add_daily_pnl(pnl, pnl > 0)
+        await add_daily_pnl(pnl, close_reason == 'tp_hit')
         logger.info(f"[PAPER] CLOSE {pos['side'].upper()} {pos['symbol']} @ {price:.4f} PnL={pnl:+.2f} ({close_reason})")
         return {"status": "success", "symbol": pos["symbol"], "side": pos["side"],
                 "price": price, "pnl": pnl, "close_reason": close_reason}
@@ -260,7 +260,7 @@ class BinanceExchange:
             fill_price = float(order.get("average") or order.get("price") or price)
             pnl = await remove_position(EXCHANGE_NAME, symbol, side, fill_price, close_reason,
                                         strategy=pos.get("strategy"))
-            await add_daily_pnl(pnl, pnl > 0)
+            await add_daily_pnl(pnl, close_reason == 'tp_hit')
             return {"status": "success", "symbol": symbol, "side": side,
                     "price": fill_price, "pnl": pnl, "close_reason": close_reason}
         except Exception as e:
