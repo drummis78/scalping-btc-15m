@@ -655,7 +655,7 @@ async def dashboard():
 
     def rows_pos(items):
         if not items:
-            return "<tr><td colspan=10 style='color:#555;text-align:center;padding:20px'>Sin posiciones abiertas</td></tr>"
+            return "<tr><td colspan=12 style='color:#555;text-align:center;padding:20px'>Sin posiciones abiertas</td></tr>"
         rows = []
         for p in items:
             sym_id = p['symbol'].replace('/', '').replace(':', '')
@@ -665,7 +665,9 @@ async def dashboard():
             <td style="color:{'#00e676' if p['side']=='long' else '#ff5252'}">{p['side'].upper()}</td>
             <td>${p['entry_price']:,.4f}</td>
             <td id="_px_{sym_id}" style="color:#aaa">—</td>
-            <td id="_pnl_{sym_id}" style="color:#555">—</td>
+            <td id="_gross_{sym_id}" style="color:#555">—</td>
+            <td id="_fee_{sym_id}" style="color:#555;font-size:10px">—</td>
+            <td id="_net_{sym_id}" style="color:#555;font-weight:bold">—</td>
             <td>${p.get('sl_price') or 0:,.4f}</td>
             <td>${p.get('tp_price') or 0:,.4f}</td>
             <td>{p.get('leverage',3):.0f}x</td>
@@ -1013,7 +1015,7 @@ async def dashboard():
     </div>
 
     <h2>Posiciones abiertas ({len(pos)})</h2>
-    <table id="tbl-pos"><thead><tr><th>Estrategia</th><th>Simbolo</th><th>Lado</th><th>Entry</th><th>Precio</th><th>PnL</th><th>SL</th><th>TP</th><th>Lev</th><th>Abierto</th></tr></thead>
+    <table id="tbl-pos"><thead><tr><th>Estrategia</th><th>Simbolo</th><th>Lado</th><th>Entry</th><th>Precio</th><th>PnL Bruto</th><th>Fees</th><th>PnL Neto</th><th>SL</th><th>TP</th><th>Lev</th><th>Abierto</th></tr></thead>
     <tbody>{rows_pos(pos)}</tbody></table>
 
     <h2>Ultimos 50 trades</h2>
@@ -1161,12 +1163,14 @@ async def dashboard():
         }});
     }}
     // Live prices para posiciones abiertas
+    const TAKER_FEE = 0.0004;
     const _posData = {{}};
     document.querySelectorAll('#tbl-pos tbody tr[data-sym]').forEach(r => {{
-        const sym = r.dataset.sym;
-        const symId = sym.replace('/','').replace(':','');
+        const symId = r.dataset.sym.replace('/','').replace(':','');
         _posData[symId] = {{ entry: parseFloat(r.dataset.entry), qty: parseFloat(r.dataset.qty), side: r.dataset.side }};
     }});
+    function _fmt(v) {{ return '$'+(v>=0?'+':'')+v.toFixed(2); }}
+    function _fmtPx(v) {{ return '$'+v.toFixed(v<1?4:v<100?3:2); }}
     async function _livePrices() {{
         const ids = Object.keys(_posData);
         if (!ids.length) return;
@@ -1178,15 +1182,17 @@ async def dashboard():
                 const p = _posData[id];
                 const cur = map[id];
                 if (!cur) return;
-                const pnl = (p.side === 'long' ? cur - p.entry : p.entry - cur) * p.qty;
-                const pxEl = document.getElementById('_px_'+id);
-                const pnlEl = document.getElementById('_pnl_'+id);
-                if (pxEl) pxEl.textContent = '$' + cur.toFixed(cur < 1 ? 4 : cur < 100 ? 3 : 2);
-                if (pnlEl) {{
-                    pnlEl.textContent = (pnl>=0?'+':'')+pnl.toFixed(2);
-                    pnlEl.style.color = pnl>=0 ? '#00e676' : '#ff5252';
-                    pnlEl.style.fontWeight = 'bold';
-                }}
+                const gross = (p.side==='long' ? cur-p.entry : p.entry-cur) * p.qty;
+                const fees  = (p.entry + cur) * p.qty * TAKER_FEE;
+                const net   = gross - fees;
+                const pxEl    = document.getElementById('_px_'+id);
+                const grossEl = document.getElementById('_gross_'+id);
+                const feeEl   = document.getElementById('_fee_'+id);
+                const netEl   = document.getElementById('_net_'+id);
+                if (pxEl)    pxEl.textContent = _fmtPx(cur);
+                if (grossEl) {{ grossEl.textContent = _fmt(gross).replace('$+','+$').replace('$-','-$'); grossEl.style.color = gross>=0?'#00e676':'#ff5252'; }}
+                if (feeEl)   {{ feeEl.textContent = '-$'+fees.toFixed(2); feeEl.style.color='#ff9800'; }}
+                if (netEl)   {{ netEl.textContent = _fmt(net).replace('$+','+$').replace('$-','-$'); netEl.style.color = net>=0?'#00e676':'#ff5252'; }}
             }});
         }} catch(e) {{}}
     }}
