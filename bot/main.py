@@ -1002,6 +1002,7 @@ async def dashboard():
             </div>
         <div style="display:flex;gap:8px">
             <button onclick="resetBot('15m')" style="padding:7px 14px;border-radius:8px;border:1px solid #ff525244;background:#ff52520d;color:#ff5252;cursor:pointer;font-size:11px;font-weight:bold">🗑 Reset 15m Bot</button>
+            <button onclick="resetDB()" style="padding:7px 14px;border-radius:8px;border:1px solid #ff525244;background:#ff52520d;color:#ff5252;cursor:pointer;font-size:11px;font-weight:bold">🗑 Reset DB</button>
         </div>
     </div>
 
@@ -1071,6 +1072,22 @@ async def dashboard():
     <div class="refresh-note">Auto-refresh cada 60s</div>
     </div>
 
+    <div id="_modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.75);z-index:9999;align-items:center;justify-content:center">
+      <div style="background:#1a1a1a;border:1px solid #333;border-radius:12px;padding:24px;width:340px">
+        <div id="_mtitle" style="font-size:15px;font-weight:bold;margin-bottom:8px"></div>
+        <div id="_mmsg" style="font-size:12px;color:#aaa;margin-bottom:16px;white-space:pre-line"></div>
+        <div id="_msec" style="display:none;margin-bottom:16px">
+          <div style="font-size:10px;color:#555;margin-bottom:4px">WEBHOOK_SECRET</div>
+          <input id="_minput" type="password" placeholder="secret..." style="width:100%;padding:8px;background:#111;border:1px solid #444;border-radius:6px;color:#fff;font-size:13px;box-sizing:border-box">
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button onclick="_mcancel()" style="padding:8px 16px;border-radius:6px;border:1px solid #333;background:transparent;color:#aaa;cursor:pointer">Cancelar</button>
+          <button id="_mokbtn" style="padding:8px 16px;border-radius:6px;border:none;background:#ff5252;color:#fff;cursor:pointer;font-weight:bold">Confirmar</button>
+        </div>
+      </div>
+    </div>
+    <div id="_toast" style="display:none;position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#222;border:1px solid #444;border-radius:8px;padding:12px 20px;font-size:13px;z-index:9999"></div>
+
     <script>
     let _activeTab = 'all';
     function filterTab(strat, btn) {{
@@ -1085,36 +1102,57 @@ async def dashboard():
         }});
     }}
     const _hasSecret = {'true' if settings.WEBHOOK_SECRET else 'false'};
+    let _mok = null;
+    function _showModal(title, msg, okLabel, okColor, cb) {{
+        document.getElementById('_mtitle').textContent = title;
+        document.getElementById('_mmsg').textContent = msg;
+        const sec = document.getElementById('_msec');
+        if (_hasSecret) {{ sec.style.display='block'; document.getElementById('_minput').value=''; }}
+        else sec.style.display='none';
+        const btn = document.getElementById('_mokbtn');
+        btn.textContent = okLabel; btn.style.background = okColor;
+        document.getElementById('_modal').style.display='flex';
+        _mok = cb;
+        if (_hasSecret) setTimeout(()=>document.getElementById('_minput').focus(), 50);
+    }}
+    function _mcancel() {{ document.getElementById('_modal').style.display='none'; _mok=null; }}
+    document.getElementById('_modal').addEventListener('click', function(e){{ if(e.target===this) _mcancel(); }});
+    document.addEventListener('keydown', function(e){{ if(e.key==='Escape') _mcancel(); if(e.key==='Enter' && _mok) document.getElementById('_mokbtn').click(); }});
+    document.getElementById('_mokbtn').addEventListener('click', function(){{
+        const secret = _hasSecret ? document.getElementById('_minput').value : '';
+        document.getElementById('_modal').style.display='none';
+        if (_mok) {{ _mok(secret); _mok=null; }}
+    }});
+    function _toast(msg, ok) {{
+        const t = document.getElementById('_toast');
+        t.textContent = msg; t.style.color = ok ? '#00e676' : '#ff5252';
+        t.style.display='block';
+        setTimeout(()=>{{ t.style.display='none'; if(ok) location.reload(); }}, 2000);
+    }}
     function resetBot(group) {{
-        const label = group === '15m' ? '15m Bot (Donchian + TCP)' : '1H v2 Bot';
-        if (!confirm('⚠️ Resetear ' + label + '?\nSe borrarán posiciones, trades y señales de este bot.')) return;
-        let secret = '';
-        if (_hasSecret) {{
-            secret = prompt('🔑 Ingresá el WEBHOOK_SECRET para confirmar:');
-            if (secret === null) return;
-        }}
-        fetch('/admin/reset_strategy?group=' + group + '&confirm=RESET', {{
-            method: 'POST',
-            headers: {{'X-Secret': secret}}
-        }})
-            .then(r => {{ if (!r.ok) throw new Error('Error ' + r.status + ' — verificá el secret'); return r.json(); }})
-            .then(d => {{ alert('✅ Reset OK — ' + d.closed + ' posición(es) cerrada(s)'); location.reload(); }})
-            .catch(e => alert('❌ Error: ' + e));
+        const label = group==='15m' ? '15m Bot (Donchian + TCP)' : '1H v2 Bot';
+        _showModal('🗑 Resetear ' + label, 'Se borrarán posiciones, trades y señales.', 'Resetear', '#ff5252', function(secret) {{
+            fetch('/admin/reset_strategy?group='+group+'&confirm=RESET', {{method:'POST',headers:{{'X-Secret':secret}}}})
+                .then(r=>{{ if(!r.ok) throw new Error('Error '+r.status+' — verificá el secret'); return r.json(); }})
+                .then(d=>_toast('✅ Reset OK — '+d.closed+' posición(es)', true))
+                .catch(e=>_toast('❌ '+e, false));
+        }});
     }}
     function resetBalance() {{
-        if (!confirm('↺ Resetear balance a ${settings.PAPER_BALANCE:.0f}?\nNo borra posiciones ni trades.')) return;
-        let secret = '';
-        if (_hasSecret) {{
-            secret = prompt('🔑 Ingresá el WEBHOOK_SECRET para confirmar:');
-            if (secret === null) return;
-        }}
-        fetch('/admin/reset_balance', {{
-            method: 'POST',
-            headers: {{'X-Secret': secret}}
-        }})
-            .then(r => {{ if (!r.ok) throw new Error('Error ' + r.status + ' — verificá el secret'); return r.json(); }})
-            .then(d => {{ alert('✅ Balance reseteado a $' + d.balance); location.reload(); }})
-            .catch(e => alert('❌ Error: ' + e));
+        _showModal('↺ Reset Balance', 'Resetea el balance a ${settings.PAPER_BALANCE:.0f}.\nNo borra posiciones ni trades.', 'Resetear', '#00bcd4', function(secret) {{
+            fetch('/admin/reset_balance', {{method:'POST',headers:{{'X-Secret':secret}}}})
+                .then(r=>{{ if(!r.ok) throw new Error('Error '+r.status+' — verificá el secret'); return r.json(); }})
+                .then(d=>_toast('✅ Balance → $'+d.balance, true))
+                .catch(e=>_toast('❌ '+e, false));
+        }});
+    }}
+    function resetDB() {{
+        _showModal('🗑 Reset DB COMPLETO', 'Se borrarán TODOS los datos:\nposiciones, trades, señales y balance.', 'Borrar todo', '#ff5252', function(secret) {{
+            fetch('/admin/reset?confirm=RESET', {{method:'POST',headers:{{'X-Secret':secret}}}})
+                .then(r=>{{ if(!r.ok) throw new Error('Error '+r.status+' — verificá el secret'); return r.json(); }})
+                .then(()=>_toast('✅ DB limpiada', true))
+                .catch(e=>_toast('❌ '+e, false));
+        }});
     }}
     setTimeout(() => location.reload(), 60000);
     </script>
