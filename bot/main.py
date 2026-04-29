@@ -28,6 +28,8 @@ from bot.exchange import binance_exchange
 from bot.scanner import load_top50_symbols, scan_all
 from bot.fundamental import fundamental_filter
 from bot.notifier import notifier
+import bot.macro_regime as macro_regime
+import bot.cvd_monitor as cvd_monitor
 
 os.makedirs(os.path.dirname(settings.LOG_FILE), exist_ok=True)
 logging.basicConfig(
@@ -205,6 +207,18 @@ async def _process_signal(sig: dict):
                          chop_val=chop_val)
         return
 
+    # Régimen macro — solo observación, nunca bloquea
+    mr = macro_regime.get_regime()
+    mr_regime = mr.get("regime", "unknown")
+    mr_would_block = (
+        (side == "long"  and mr_regime == "bear") or
+        (side == "short" and mr_regime == "bull")
+    )
+
+    # CVD / TBR — solo observación, nunca bloquea
+    tbr = await cvd_monitor.get_tbr(symbol)
+    cvd_would_block = cvd_monitor.would_block(side, tbr)
+
     # Ejecutar
     result = await binance_exchange.open_position(
         symbol, side, price, sl_price, tp_price, settings.MAX_LEVERAGE,
@@ -213,10 +227,16 @@ async def _process_signal(sig: dict):
         strategy=strategy,
     )
 
+    result_data = dict(result)
+    result_data["macro_regime"]       = mr_regime
+    result_data["macro_would_block"]  = mr_would_block
+    result_data["cvd_tbr"]            = tbr
+    result_data["cvd_would_block"]    = cvd_would_block
+
     await log_signal(ts, symbol, side, price, sl_price, tp_price,
                      _fund_allow, _fund_reason, _fund_impact,
                      "executed" if result["status"] == "success" else f"error_{result.get('reason','')}",
-                     json.dumps(result), strategy, chop_val=chop_val)
+                     json.dumps(result_data), strategy, chop_val=chop_val)
 
     if result["status"] == "success":
         lev = result.get("leverage", settings.MAX_LEVERAGE)
@@ -444,6 +464,7 @@ async def lifespan(app: FastAPI):
 
     logger.info(f"[FUNDAMENTAL] FUNDAMENTAL_ENABLED={settings.FUNDAMENTAL_ENABLED!r}")
     await fundamental_filter.start()
+    await macro_regime.start()
 
     scanner_task    = asyncio.create_task(_signal_scanner())
     monitor_task    = asyncio.create_task(_position_monitor())
@@ -459,6 +480,7 @@ async def lifespan(app: FastAPI):
     daily_task.cancel()
     reconcile_task.cancel()
     await fundamental_filter.stop()
+    await macro_regime.stop()
     await notifier.stop()
     logger.info("Scalping Bot stopped")
 
@@ -627,6 +649,28 @@ async def dashboard():
             SELECT COUNT(*) FROM signal_log
             WHERE verdict='filtered_fundamental' AND ts::timestamptz >= NOW() - INTERVAL '24 hours'
         """) or 0
+        # Macro regime shadow stats
+        macro_shadow = dict(await conn.fetchrow("""
+            SELECT
+                COUNT(*) total,
+                SUM(CASE WHEN result_json LIKE '%"macro_would_block": true%' THEN 1 ELSE 0 END) would_block,
+                SUM(CASE WHEN result_json LIKE '%"macro_would_block": true%'
+                         AND result_json LIKE '%tp_hit%' THEN 1 ELSE 0 END) wblock_wins,
+                SUM(CASE WHEN result_json LIKE '%"macro_would_block": true%'
+                         AND result_json LIKE '%sl_hit%' THEN 1 ELSE 0 END) wblock_losses
+            FROM signal_log WHERE verdict='executed'
+        """))
+        # CVD shadow stats
+        cvd_shadow = dict(await conn.fetchrow("""
+            SELECT
+                COUNT(*) total,
+                SUM(CASE WHEN result_json LIKE '%"cvd_would_block": true%' THEN 1 ELSE 0 END) would_block,
+                SUM(CASE WHEN result_json LIKE '%"cvd_would_block": true%'
+                         AND result_json LIKE '%tp_hit%' THEN 1 ELSE 0 END) wblock_wins,
+                SUM(CASE WHEN result_json LIKE '%"cvd_would_block": true%'
+                         AND result_json LIKE '%sl_hit%' THEN 1 ELSE 0 END) wblock_losses
+            FROM signal_log WHERE verdict='executed'
+        """))
 
     mode      = "PAPER" if settings.TESTNET else "REAL"
     pnl_d     = daily.get("realized_pnl", 0)
@@ -1045,6 +1089,50 @@ async def dashboard():
 
     <h2>Rendimiento por estrategia</h2>
     <div class="scards">{strat_cards_html}</div>
+
+    <h2>🔭 Monitores shadow (solo observación — no bloquean señales)</h2>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:20px">
+
+      <!-- Macro Regime Monitor -->
+      {(lambda mr=macro_regime.get_regime(), ms=macro_shadow: f"""
+      <div style="background:#161616;border:1px solid #222;border-radius:10px;padding:16px;flex:1;min-width:260px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <span style="font-weight:bold;font-size:13px;color:#aaa">Macro Regime (EMA20/50 semanal)</span>
+          <span style="font-size:10px;color:#444">{(mr.get('updated_at') or '')[:16]} UTC</span>
+        </div>
+        <div style="display:flex;gap:20px;align-items:center;margin-bottom:14px">
+          <div style="font-size:28px;font-weight:bold;color:{'#00e676' if mr['regime']=='bull' else '#ff5252' if mr['regime']=='bear' else '#ffd740' if mr['regime']=='neutral' else '#555'}">{mr['regime'].upper()}</div>
+          <div style="font-size:11px;color:#555;line-height:1.7">
+            EMA{20}: <b style="color:#aaa">${mr.get('ema_fast') or '—':,}</b><br>
+            EMA{50}: <b style="color:#aaa">${mr.get('ema_slow') or '—':,}</b>
+          </div>
+        </div>
+        <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Si estuviera activo hubiera...</div>
+        <div style="display:flex;gap:16px">
+          <div><div style="font-size:16px;font-weight:bold;color:#ff5252">{ms.get('would_block',0)}</div><div style="font-size:10px;color:#555">bloqueado</div></div>
+          <div><div style="font-size:16px;font-weight:bold;color:#00e676">{ms.get('wblock_wins',0)}</div><div style="font-size:10px;color:#555">eran wins</div></div>
+          <div><div style="font-size:16px;font-weight:bold;color:#aaa">{ms.get('wblock_losses',0)}</div><div style="font-size:10px;color:#555">eran losses</div></div>
+          <div><div style="font-size:16px;font-weight:bold;color:#ffd740">{ms.get('total',0)}</div><div style="font-size:10px;color:#555">señales totales</div></div>
+        </div>
+      </div>""")()}
+
+      <!-- CVD Monitor -->
+      {(lambda cs=cvd_shadow: f"""
+      <div style="background:#161616;border:1px solid #222;border-radius:10px;padding:16px;flex:1;min-width:260px">
+        <div style="margin-bottom:12px">
+          <span style="font-weight:bold;font-size:13px;color:#aaa">CVD / Taker Buy Ratio (15m)</span>
+          <div style="font-size:10px;color:#555;margin-top:4px">LONG bloqueado si TBR &lt; 0.50 · SHORT bloqueado si TBR &gt; 0.50</div>
+        </div>
+        <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Si estuviera activo hubiera...</div>
+        <div style="display:flex;gap:16px">
+          <div><div style="font-size:16px;font-weight:bold;color:#ff5252">{cs.get('would_block',0)}</div><div style="font-size:10px;color:#555">bloqueado</div></div>
+          <div><div style="font-size:16px;font-weight:bold;color:#00e676">{cs.get('wblock_wins',0)}</div><div style="font-size:10px;color:#555">eran wins</div></div>
+          <div><div style="font-size:16px;font-weight:bold;color:#aaa">{cs.get('wblock_losses',0)}</div><div style="font-size:10px;color:#555">eran losses</div></div>
+          <div><div style="font-size:16px;font-weight:bold;color:#ffd740">{cs.get('total',0)}</div><div style="font-size:10px;color:#555">señales totales</div></div>
+        </div>
+      </div>""")()}
+
+    </div>
 
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:8px">
         <div class="tabs" style="margin-bottom:0">
