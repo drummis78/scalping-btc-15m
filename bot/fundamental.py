@@ -1,7 +1,6 @@
 """
 Fundamental filter para el bot de scalping 15m.
-Misma arquitectura que 4H/1H: Fear & Greed + NewsAPI + Groq LLM.
-Impacto evaluado en ventana de 4h — relevante para scalping.
+Fuentes: CryptoPanic (real-time, gratis) + NewsAPI (complemento) + Fear & Greed.
 """
 import asyncio
 import logging
@@ -17,8 +16,9 @@ from bot.state import get_pool
 
 logger = logging.getLogger("scalping_bot.fundamental")
 
-NEWSAPI_URL    = "https://newsapi.org/v2/everything"
-FEAR_GREED_URL = "https://api.alternative.me/fng/?limit=1&format=json"
+NEWSAPI_URL      = "https://newsapi.org/v2/everything"
+FEAR_GREED_URL   = "https://api.alternative.me/fng/?limit=1&format=json"
+CRYPTOPANIC_URL  = "https://cryptopanic.com/api/v1/posts/"
 
 IMPACT_BLOCK_THRESHOLD   = 7.0
 IMPACT_REDUCE_THRESHOLD  = 4.0
@@ -26,19 +26,33 @@ FEAR_GREED_EXTREME_FEAR  = 20
 FEAR_GREED_EXTREME_GREED = 82
 IMPACT_WINDOW_HOURS      = 12
 
+# Términos crypto + macro que mueven el mercado
+NEWSAPI_QUERY = (
+    "bitcoin OR BTC OR crypto OR ethereum OR "
+    "Federal Reserve OR Fed rate OR interest rate OR "
+    "Trump tariff OR Iran OR war OR geopolitical OR "
+    "recession OR inflation OR CPI OR FOMC"
+)
+
 CRITICAL_KEYWORDS = [
     "hacked", "hack", "exploit", "breach",
     "sec lawsuit", "sec charges", "banned", "shutdown",
     "chapter 11", "bankruptcy", "insolvent", "halted",
     "de-peg", "depeg", "bank run", "emergency",
+    "federal reserve", "fed rate", "interest rate hike",
+    "iran", "war", "sanctions", "tariff", "recession",
 ]
+
+# CryptoPanic importance tags que indican noticias de alto impacto
+CRYPTOPANIC_HOT_VOTES = 5   # mínimo votos "importante" para considerar
 
 _LLM_SYSTEM = """Sos un analista financiero especializado en crypto.
 Dado un titular, respondé SOLO con JSON válido:
 {"sentiment": <float -1.0 a 1.0>, "impact": <float 0.0 a 10.0>, "reason": "<1 oración>"}
+Noticias macro negativas (guerra, sanciones, crisis, suba de tasas) → impact 6-9, sentiment negativo.
 Regulación adversa, hackeos, quiebras → impact alto, sentiment negativo.
 ETF aprobado, adopción institucional → impact alto, sentiment positivo.
-Noticias de precio, predicciones → impact bajo (< 3)."""
+Noticias de precio, predicciones, análisis → impact bajo (< 3)."""
 
 
 class FundamentalFilter:
@@ -52,14 +66,13 @@ class FundamentalFilter:
             return
         await self._ensure_table()
         self._poll_task = asyncio.create_task(self._poll_loop())
-        logger.info("[FUNDAMENTAL] Poller iniciado")
+        logger.info("[FUNDAMENTAL] Poller iniciado (CryptoPanic + NewsAPI)")
 
     async def stop(self):
         if self._poll_task:
             self._poll_task.cancel()
 
     async def _ensure_table(self):
-        # tabla creada en init_db() — no-op aquí
         pass
 
     async def _poll_loop(self):
@@ -71,12 +84,14 @@ class FundamentalFilter:
             await asyncio.sleep(settings.FUNDAMENTAL_POLL_INTERVAL)
 
     async def _poll_all(self):
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
-            results = await asyncio.gather(
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+            tasks = [
                 self._poll_fear_greed(session),
-                self._poll_newsapi(session),
-                return_exceptions=True
-            )
+                self._poll_cryptopanic(session),
+            ]
+            if settings.NEWSAPI_KEY:
+                tasks.append(self._poll_newsapi(session))
+            results = await asyncio.gather(*tasks, return_exceptions=True)
             for r in results:
                 if isinstance(r, Exception):
                     logger.error(f"[FUNDAMENTAL] Poll error: {r}")
@@ -97,13 +112,79 @@ class FundamentalFilter:
             """, ts, "sentiment", "fear_greed", entry["value_classification"],
                  (value - 50) / 50, value, 0.0, json.dumps(entry))
 
-    async def _poll_newsapi(self, session: aiohttp.ClientSession):
-        if not settings.NEWSAPI_KEY:
+    async def _poll_cryptopanic(self, session: aiohttp.ClientSession):
+        """
+        CryptoPanic API — tiempo real, gratis, cubre noticias crypto y macro relevante.
+        No requiere API key para el feed público.
+        """
+        params = {
+            "public":   "true",
+            "kind":     "news",
+            "filter":   "hot",          # solo noticias con tracción
+            "regions":  "en",
+        }
+        if settings.CRYPTOPANIC_API_KEY:
+            params["auth_token"] = settings.CRYPTOPANIC_API_KEY
+
+        try:
+            async with session.get(CRYPTOPANIC_URL, params=params) as resp:
+                body = await resp.text()
+                if resp.status != 200:
+                    logger.warning(f"[FUNDAMENTAL] CryptoPanic status {resp.status}: {body[:200]}")
+                    return
+                data = await resp.json(content_type=None)
+        except Exception as e:
+            logger.warning(f"[FUNDAMENTAL] CryptoPanic request error: {e}")
             return
-        from_ts = (datetime.utcnow() - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%S")
+
+        results = data.get("results", [])
+        logger.info(f"[FUNDAMENTAL] CryptoPanic: {len(results)} noticias hot recibidas")
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        events = []
+        for item in results:
+            title = (item.get("title") or "")[:200]
+            if not title:
+                continue
+
+            pub = item.get("published_at") or item.get("created_at", "")
+            try:
+                pub_dt = datetime.fromisoformat(pub.replace("Z", "+00:00"))
+                if pub_dt < cutoff:
+                    continue
+            except Exception:
+                pass
+
+            ts = pub or datetime.now(timezone.utc).isoformat()
+
+            is_critical = any(k in title.lower() for k in CRITICAL_KEYWORDS)
+
+            if settings.GROQ_API_KEY:
+                llm = await self._score_with_llm(title)
+                sentiment = llm.get("sentiment", 0.0)
+                impact    = llm.get("impact", 0.0)
+                if is_critical:
+                    impact = max(impact, 6.0)
+            else:
+                sentiment = 0.0
+                impact    = 6.0 if is_critical else 3.0  # noticias hot sin LLM = impacto medio
+
+            events.append((ts, "news", "cryptopanic", title, sentiment, 0.0, impact,
+                           json.dumps({"url": item.get("url", ""), "source": item.get("source", {}).get("title", "")})))
+
+        if events:
+            async with get_pool().acquire() as conn:
+                await conn.executemany("""
+                    INSERT INTO fundamental_events (ts,category,source,title,sentiment,magnitude,impact,raw_data)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING
+                """, events)
+            logger.info(f"[FUNDAMENTAL] CryptoPanic: {len(events)} noticias guardadas")
+
+    async def _poll_newsapi(self, session: aiohttp.ClientSession):
+        from_ts = (datetime.utcnow() - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%S")
         params = {
             "apiKey":   settings.NEWSAPI_KEY,
-            "q":        "bitcoin OR BTC OR crypto",
+            "q":        NEWSAPI_QUERY,
             "language": "en",
             "sortBy":   "publishedAt",
             "pageSize": 20,
@@ -117,7 +198,7 @@ class FundamentalFilter:
             data = await resp.json(content_type=None)
 
         articles = data.get("articles", [])
-        logger.info(f"[FUNDAMENTAL] NewsAPI: {len(articles)} artículos recibidos, status={data.get('status')}")
+        logger.info(f"[FUNDAMENTAL] NewsAPI: {len(articles)} artículos recibidos")
         events = []
         for item in articles:
             title = (item.get("title") or "")[:200]
@@ -127,13 +208,13 @@ class FundamentalFilter:
             is_critical = any(k in title.lower() for k in CRITICAL_KEYWORDS)
             if settings.GROQ_API_KEY:
                 llm = await self._score_with_llm(title)
-                sentiment  = llm.get("sentiment", 0.0)
-                impact     = llm.get("impact", 0.0)
+                sentiment = llm.get("sentiment", 0.0)
+                impact    = llm.get("impact", 0.0)
                 if is_critical:
                     impact = max(impact, 6.0)
             else:
-                sentiment  = 0.0
-                impact     = 6.0 if is_critical else 0.0
+                sentiment = 0.0
+                impact    = 6.0 if is_critical else 0.0
             events.append((ts, "news", "newsapi", title, sentiment, 0.0, impact,
                            json.dumps({"url": item.get("url", "")})))
 
