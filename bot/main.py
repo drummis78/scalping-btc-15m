@@ -655,17 +655,23 @@ async def dashboard():
 
     def rows_pos(items):
         if not items:
-            return "<tr><td colspan=8 style='color:#555;text-align:center;padding:20px'>Sin posiciones abiertas</td></tr>"
-        return "".join(f"""<tr data-strat="{p.get('strategy','')}">
+            return "<tr><td colspan=10 style='color:#555;text-align:center;padding:20px'>Sin posiciones abiertas</td></tr>"
+        rows = []
+        for p in items:
+            sym_id = p['symbol'].replace('/', '').replace(':', '')
+            rows.append(f"""<tr data-strat="{p.get('strategy','')}" data-sym="{p['symbol']}" data-entry="{p['entry_price']}" data-qty="{p.get('qty',0)}" data-side="{p['side']}">
             <td>{badge(p.get('strategy',''))}</td>
             <td><b>{p['symbol']}</b></td>
             <td style="color:{'#00e676' if p['side']=='long' else '#ff5252'}">{p['side'].upper()}</td>
             <td>${p['entry_price']:,.4f}</td>
+            <td id="_px_{sym_id}" style="color:#aaa">—</td>
+            <td id="_pnl_{sym_id}" style="color:#555">—</td>
             <td>${p.get('sl_price') or 0:,.4f}</td>
             <td>${p.get('tp_price') or 0:,.4f}</td>
             <td>{p.get('leverage',3):.0f}x</td>
             <td>{str(p.get('open_time',''))[:16]}</td>
-        </tr>""" for p in items)
+        </tr>""")
+        return "".join(rows)
 
     def rows_trades(items):
         if not items:
@@ -1007,7 +1013,7 @@ async def dashboard():
     </div>
 
     <h2>Posiciones abiertas ({len(pos)})</h2>
-    <table id="tbl-pos"><thead><tr><th>Estrategia</th><th>Simbolo</th><th>Lado</th><th>Entry</th><th>SL</th><th>TP</th><th>Lev</th><th>Abierto</th></tr></thead>
+    <table id="tbl-pos"><thead><tr><th>Estrategia</th><th>Simbolo</th><th>Lado</th><th>Entry</th><th>Precio</th><th>PnL</th><th>SL</th><th>TP</th><th>Lev</th><th>Abierto</th></tr></thead>
     <tbody>{rows_pos(pos)}</tbody></table>
 
     <h2>Ultimos 50 trades</h2>
@@ -1154,6 +1160,37 @@ async def dashboard():
                 .catch(e=>_toast('❌ '+e, false));
         }});
     }}
+    // Live prices para posiciones abiertas
+    const _posData = {{}};
+    document.querySelectorAll('#tbl-pos tbody tr[data-sym]').forEach(r => {{
+        const sym = r.dataset.sym;
+        const symId = sym.replace('/','').replace(':','');
+        _posData[symId] = {{ entry: parseFloat(r.dataset.entry), qty: parseFloat(r.dataset.qty), side: r.dataset.side }};
+    }});
+    async function _livePrices() {{
+        const ids = Object.keys(_posData);
+        if (!ids.length) return;
+        try {{
+            const all = await fetch('https://fapi.binance.com/fapi/v1/ticker/price').then(r=>r.json());
+            const map = {{}};
+            all.forEach(p => map[p.symbol] = parseFloat(p.price));
+            ids.forEach(id => {{
+                const p = _posData[id];
+                const cur = map[id];
+                if (!cur) return;
+                const pnl = (p.side === 'long' ? cur - p.entry : p.entry - cur) * p.qty;
+                const pxEl = document.getElementById('_px_'+id);
+                const pnlEl = document.getElementById('_pnl_'+id);
+                if (pxEl) pxEl.textContent = '$' + cur.toFixed(cur < 1 ? 4 : cur < 100 ? 3 : 2);
+                if (pnlEl) {{
+                    pnlEl.textContent = (pnl>=0?'+':'')+pnl.toFixed(2);
+                    pnlEl.style.color = pnl>=0 ? '#00e676' : '#ff5252';
+                    pnlEl.style.fontWeight = 'bold';
+                }}
+            }});
+        }} catch(e) {{}}
+    }}
+    if (Object.keys(_posData).length) {{ _livePrices(); setInterval(_livePrices, 5000); }}
     setTimeout(() => location.reload(), 60000);
     </script>
     </body></html>"""
