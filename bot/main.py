@@ -106,11 +106,12 @@ async def _process_signal(sig: dict):
         logger.debug(f"[REPLAY] {symbol} {side} candle={candle_ts}")
         return
 
-    # Posición ya abierta para esta estrategia en este símbolo/lado
-    if await get_position("binance", symbol, side, strategy):
-        logger.debug(f"[SKIP] {symbol} {side} — posición ya abierta ({strategy})")
+    # Bloquear solo si hay posición abierta en dirección OPUESTA (anti-hedge)
+    opposite_side = "short" if side == "long" else "long"
+    if await get_position("binance", symbol, opposite_side):
+        logger.debug(f"[SKIP] {symbol} {side} — posición opuesta abierta ({opposite_side}), anti-hedge")
         await log_signal(ts, symbol, side, price, sl_price, tp_price,
-                         True, f"conflict|pos_abierta|{candle_ts}", 0.0, "blocked_conflict",
+                         True, f"conflict|hedge_{opposite_side}|{candle_ts}", 0.0, "blocked_conflict",
                          json.dumps({"outcome": "pending"}), strategy, chop_val=chop_val)
         return
 
