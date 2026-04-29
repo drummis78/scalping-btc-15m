@@ -517,9 +517,19 @@ async def dashboard():
     pos   = [dict(p) for p in await get_all_positions()]
     daily = await get_today_stats() or {}
     signals = await get_signal_log(limit=50)
+    from bot.state import ARG_TZ
+    today_str = datetime.now(ARG_TZ).strftime("%Y-%m-%d")
     async with get_pool().acquire() as conn:
         trades = [dict(r) for r in await conn.fetch(
             "SELECT * FROM trades ORDER BY id DESC LIMIT 50")]
+        today_breakdown = dict(await conn.fetchrow(f"""
+            SELECT
+                COALESCE(SUM(CASE WHEN close_reason='tp_hit' THEN 1 ELSE 0 END),0)            wins_hoy,
+                COALESCE(SUM(CASE WHEN close_reason='sl_hit' AND pnl>=0 THEN 1 ELSE 0 END),0) be_hoy,
+                COALESCE(SUM(CASE WHEN close_reason='sl_hit' AND pnl<0  THEN 1 ELSE 0 END),0) losses_hoy
+            FROM trades
+            WHERE close_time::timestamptz AT TIME ZONE 'America/Argentina/Buenos_Aires' >= '{today_str}'::date
+        """))
         strat_rows = [dict(r) for r in await conn.fetch("""
             SELECT strategy,
                    COUNT(*) trades,
@@ -1023,7 +1033,9 @@ async def dashboard():
         <div class="card"><div class="lbl">PnL hoy</div><div class="val {pnl_class}">${pnl_d:+.2f}</div></div>
         <div class="card"><div class="lbl">Posiciones abiertas</div><div class="val">{len(pos)}</div></div>
         <div class="card"><div class="lbl">Trades hoy</div><div class="val">{daily.get('trade_count',0)}</div></div>
-        <div class="card"><div class="lbl">Wins hoy</div><div class="val pos">{daily.get('win_count',0)}</div></div>
+        <div class="card"><div class="lbl">Wins hoy</div><div class="val pos">{today_breakdown['wins_hoy']}</div></div>
+        <div class="card"><div class="lbl">BE hoy</div><div class="val" style="color:#ffd740">{today_breakdown['be_hoy']}</div></div>
+        <div class="card"><div class="lbl">Losses hoy</div><div class="val neg">{today_breakdown['losses_hoy']}</div></div>
     </div>
 
     <h2>Rendimiento por estrategia</h2>
