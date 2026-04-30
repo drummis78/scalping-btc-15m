@@ -118,12 +118,12 @@ async def _get_funding_rate(exchange: ccxt_async.binance, symbol: str) -> Option
 
 async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[dict]:
     """
-    Retorna señal, señal bloqueada por tendencia, o None.
-    Señal bloqueada lleva 'blocked_reason'. Señal válida no lo tiene.
+    Shadow mode: detecta breakouts Donchian y SIEMPRE ejecuta.
+    Los filtros de calidad (vol, body, ATR%, ADX, régimen, tendencia, funding)
+    se calculan como flags shadow para análisis posterior — nunca bloquean.
     """
     symbol = config["symbol"]
 
-    # Filtro horario: allow-list (vacío = todo habilitado) y block-list explícita
     now_hour = datetime.now(timezone.utc).hour
     if ACTIVE_HOURS and now_hour not in ACTIVE_HOURS:
         return None
@@ -131,7 +131,7 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
         return None
 
     try:
-        atrpct_len = settings.ATRPCT_FILTER_LEN if settings.ATRPCT_FILTER_ENABLED else 0
+        atrpct_len = settings.ATRPCT_FILTER_LEN if settings.ATRPCT_FILTER_ENABLED else 100
         fetch_limit = max(LOOKBACK + 20, atrpct_len + 20)
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe="15m", limit=fetch_limit)
         if len(ohlcv) < LOOKBACK + 2:
@@ -139,36 +139,37 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
 
         df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
 
-        # ATR(14)
         df.ta.atr(length=14, append=True)
         atr_col = [c for c in df.columns if c.startswith("ATR")]
         if not atr_col or pd.isna(df[atr_col[0]].iloc[-1]):
             return None
         atr = float(df[atr_col[0]].iloc[-1])
 
-        # ATR Percentile filter
+        # Shadow: ATR Percentile
+        shadow_atrpct_val = 0.0
+        shadow_atrpct_ok  = True
         if settings.ATRPCT_FILTER_ENABLED:
             n = settings.ATRPCT_FILTER_LEN
             atr_series = df[atr_col[0]]
-            atr_lo = atr_series.rolling(n).min()
-            atr_hi = atr_series.rolling(n).max()
+            atr_lo  = atr_series.rolling(n).min()
+            atr_hi  = atr_series.rolling(n).max()
             atr_pct = (atr_series - atr_lo) / (atr_hi - atr_lo + 1e-10) * 100
             cur_pct = float(atr_pct.iloc[-2])
-            if pd.isna(cur_pct) or cur_pct < settings.ATRPCT_FILTER_THRESHOLD:
-                return None
+            shadow_atrpct_val = round(cur_pct, 1) if not pd.isna(cur_pct) else 0.0
+            shadow_atrpct_ok  = not pd.isna(cur_pct) and cur_pct >= settings.ATRPCT_FILTER_THRESHOLD
 
-        # ADX(14): confirma momentum direccional — sin ADX fuerte el breakout revierte
+        # Shadow: ADX
         df.ta.adx(length=14, append=True)
         adx_col = [c for c in df.columns if c.startswith("ADX_") and not c.startswith("ADX_D")]
         adx_val = float(df[adx_col[0]].iloc[-2]) if adx_col and not pd.isna(df[adx_col[0]].iloc[-2]) else 0.0
+        shadow_adx_ok = adx_val >= settings.ADX_THRESHOLD
 
-        # Donchian con shift(1): el canal no incluye la vela actual
+        # Donchian
         df["upper"]   = df["high"].shift(1).rolling(window=LOOKBACK).max()
         df["lower"]   = df["low"].shift(1).rolling(window=LOOKBACK).min()
         df["vol_avg"] = df["volume"].rolling(window=LOOKBACK).mean()
 
-        # Última vela CERRADA (iloc[-2])
-        last = df.iloc[-2]
+        last       = df.iloc[-2]
         candle_ts  = str(int(last["timestamp"]))
         last_close = float(last["close"])
         last_open  = float(last["open"])
@@ -182,121 +183,100 @@ async def scan_symbol(exchange: ccxt_async.binance, config: dict) -> Optional[di
         if pd.isna(upper) or pd.isna(lower) or pd.isna(vol_avg) or vol_avg == 0:
             return None
 
-        # Filtro de cuerpo de vela: elimina velas con mecha dominante
         candle_range = last_high - last_low
         candle_body  = abs(last_close - last_open)
         body_pct     = (candle_body / candle_range) if candle_range > 0 else 0
-        body_ok      = body_pct >= MIN_BODY_PCT
 
-        # Filtro volumen
-        vol_ok = last_vol > vol_avg * VOL_MULT
+        # Shadow: calidad de vela y volumen
+        shadow_vol_ok  = last_vol > vol_avg * VOL_MULT
+        shadow_body_ok = body_pct >= MIN_BODY_PCT
 
-        logger.debug(
-            f"[SCAN] {symbol} vol_ok={vol_ok} body={body_pct*100:.0f}% "
-            f"high>upper={last_high>upper} low<lower={last_low<lower} "
-            f"green={last_close>last_open}"
-        )
-
-        # ── LONG: high supera DC upper, vela verde con cuerpo real, ADX confirma ─
-        if last_high > upper and vol_ok and body_ok and last_close > last_open:
-            if adx_val < settings.ADX_THRESHOLD:
-                return {
-                    "symbol": symbol, "side": "long", "price": last_close,
-                    "sl_price": round(last_close - atr * SL_MULT, 6),
-                    "tp_price": round(last_close + atr * TP_MULT, 6),
-                    "candle_ts": candle_ts, "blocked_reason": f"adx_low|{adx_val:.1f}",
-                }
-        if last_high > upper and vol_ok and body_ok and last_close > last_open and adx_val >= settings.ADX_THRESHOLD:
+        # ── LONG: breakout Donchian upper, vela verde ─────────────────────────
+        if last_high > upper and last_close > last_open:
             sl_price = round(last_close - atr * SL_MULT, 6)
             tp_price = round(last_close + atr * TP_MULT, 6)
 
-            regime, chop_val = await _get_regime_1h(exchange, symbol)
-            if regime == "lateral":
-                logger.info(f"[SCANNER] {symbol} LONG bloqueado: régimen lateral 1H CHOP={chop_val}")
-                return {
-                    "symbol": symbol, "side": "long", "price": last_close,
-                    "sl_price": sl_price, "tp_price": tp_price,
-                    "candle_ts": candle_ts, "blocked_reason": "regime_lateral",
-                    "chop_val": chop_val,
-                }
-            trend = await _get_1h_trend(exchange, symbol)
-            if trend == "down":
-                logger.info(f"[SCANNER] {symbol} LONG bloqueado: 1H bajista CHOP={chop_val}")
-                return {
-                    "symbol": symbol, "side": "long", "price": last_close,
-                    "sl_price": sl_price, "tp_price": tp_price,
-                    "candle_ts": candle_ts, "blocked_reason": "trend_1h_bearish",
-                    "chop_val": chop_val,
-                }
-            funding = await _get_funding_rate(exchange, symbol)
-            if funding is not None and funding > FUNDING_LONG_BLOCK:
-                logger.info(f"[SCANNER] {symbol} LONG bloqueado: funding={funding:.5f} > {FUNDING_LONG_BLOCK}")
-                return {
-                    "symbol": symbol, "side": "long", "price": last_close,
-                    "sl_price": sl_price, "tp_price": tp_price,
-                    "candle_ts": candle_ts, "blocked_reason": f"funding_high|{funding:.5f}",
-                    "chop_val": chop_val,
-                }
-            logger.info(f"[SCANNER] ✅ {symbol} LONG entry={last_close} sl={sl_price} tp={tp_price} CHOP={chop_val}")
+            regime, chop_val  = await _get_regime_1h(exchange, symbol)
+            trend             = await _get_1h_trend(exchange, symbol)
+            funding           = await _get_funding_rate(exchange, symbol)
+
+            shadow_regime_ok  = regime != "lateral"
+            shadow_trend_ok   = trend != "down"
+            shadow_funding_ok = funding is None or funding <= FUNDING_LONG_BLOCK
+
+            shadow_filters = [
+                f"atrpct={shadow_atrpct_val:.0f}%" if not shadow_atrpct_ok else None,
+                "vol_low"                          if not shadow_vol_ok     else None,
+                f"body={body_pct*100:.0f}%"        if not shadow_body_ok    else None,
+                f"adx={adx_val:.1f}"               if not shadow_adx_ok     else None,
+                "lateral"                          if not shadow_regime_ok  else None,
+                "trend_down"                       if not shadow_trend_ok   else None,
+                f"fund={funding:.5f}" if (funding and not shadow_funding_ok) else None,
+            ]
+            shadow_label = "|".join(f for f in shadow_filters if f) or "ok"
+            shadow_would_block = shadow_label != "ok"
+
+            logger.info(
+                f"[SCANNER] {'⚠️ SHADOW' if shadow_would_block else '✅'} {symbol} LONG "
+                f"entry={last_close} shadow={shadow_label} CHOP={chop_val}"
+            )
             return {
-                "symbol":    symbol,
-                "side":      "long",
-                "price":     last_close,
-                "sl_price":  sl_price,
-                "tp_price":  tp_price,
-                "candle_ts": candle_ts,
-                "chop_val":  chop_val,
+                "symbol": symbol, "side": "long", "price": last_close,
+                "sl_price": sl_price, "tp_price": tp_price,
+                "candle_ts": candle_ts, "chop_val": chop_val,
+                "shadow_would_block": shadow_would_block,
+                "shadow_filters": shadow_label,
+                "shadow_atrpct": shadow_atrpct_val,
+                "shadow_adx": round(adx_val, 1),
+                "shadow_vol_ok": shadow_vol_ok,
+                "shadow_body_ok": shadow_body_ok,
+                "shadow_regime_ok": shadow_regime_ok,
+                "shadow_trend_ok": shadow_trend_ok,
+                "shadow_funding_ok": shadow_funding_ok,
             }
 
-        # ── SHORT: low cae bajo DC lower, vela roja con cuerpo real, ADX confirma ─
-        if last_low < lower and vol_ok and body_ok and last_close < last_open:
-            if adx_val < settings.ADX_THRESHOLD:
-                return {
-                    "symbol": symbol, "side": "short", "price": last_close,
-                    "sl_price": round(last_close + atr * SL_MULT, 6),
-                    "tp_price": round(last_close - atr * TP_MULT, 6),
-                    "candle_ts": candle_ts, "blocked_reason": f"adx_low|{adx_val:.1f}",
-                }
-        if last_low < lower and vol_ok and body_ok and last_close < last_open and adx_val >= settings.ADX_THRESHOLD:
+        # ── SHORT: breakout Donchian lower, vela roja ─────────────────────────
+        if last_low < lower and last_close < last_open:
             sl_price = round(last_close + atr * SL_MULT, 6)
             tp_price = round(last_close - atr * TP_MULT, 6)
 
-            regime, chop_val = await _get_regime_1h(exchange, symbol)
-            if regime == "lateral":
-                logger.info(f"[SCANNER] {symbol} SHORT bloqueado: régimen lateral 1H CHOP={chop_val}")
-                return {
-                    "symbol": symbol, "side": "short", "price": last_close,
-                    "sl_price": sl_price, "tp_price": tp_price,
-                    "candle_ts": candle_ts, "blocked_reason": "regime_lateral",
-                    "chop_val": chop_val,
-                }
-            trend = await _get_1h_trend(exchange, symbol)
-            if trend == "up":
-                logger.info(f"[SCANNER] {symbol} SHORT bloqueado: 1H alcista CHOP={chop_val}")
-                return {
-                    "symbol": symbol, "side": "short", "price": last_close,
-                    "sl_price": sl_price, "tp_price": tp_price,
-                    "candle_ts": candle_ts, "blocked_reason": "trend_1h_bullish",
-                    "chop_val": chop_val,
-                }
-            funding = await _get_funding_rate(exchange, symbol)
-            if funding is not None and funding < FUNDING_SHORT_BLOCK:
-                logger.info(f"[SCANNER] {symbol} SHORT bloqueado: funding={funding:.5f} < {FUNDING_SHORT_BLOCK}")
-                return {
-                    "symbol": symbol, "side": "short", "price": last_close,
-                    "sl_price": sl_price, "tp_price": tp_price,
-                    "candle_ts": candle_ts, "blocked_reason": f"funding_low|{funding:.5f}",
-                    "chop_val": chop_val,
-                }
-            logger.info(f"[SCANNER] ✅ {symbol} SHORT entry={last_close} sl={sl_price} tp={tp_price} CHOP={chop_val}")
+            regime, chop_val  = await _get_regime_1h(exchange, symbol)
+            trend             = await _get_1h_trend(exchange, symbol)
+            funding           = await _get_funding_rate(exchange, symbol)
+
+            shadow_regime_ok  = regime != "lateral"
+            shadow_trend_ok   = trend != "up"
+            shadow_funding_ok = funding is None or funding >= FUNDING_SHORT_BLOCK
+
+            shadow_filters = [
+                f"atrpct={shadow_atrpct_val:.0f}%" if not shadow_atrpct_ok else None,
+                "vol_low"                          if not shadow_vol_ok     else None,
+                f"body={body_pct*100:.0f}%"        if not shadow_body_ok    else None,
+                f"adx={adx_val:.1f}"               if not shadow_adx_ok     else None,
+                "lateral"                          if not shadow_regime_ok  else None,
+                "trend_up"                         if not shadow_trend_ok   else None,
+                f"fund={funding:.5f}" if (funding and not shadow_funding_ok) else None,
+            ]
+            shadow_label = "|".join(f for f in shadow_filters if f) or "ok"
+            shadow_would_block = shadow_label != "ok"
+
+            logger.info(
+                f"[SCANNER] {'⚠️ SHADOW' if shadow_would_block else '✅'} {symbol} SHORT "
+                f"entry={last_close} shadow={shadow_label} CHOP={chop_val}"
+            )
             return {
-                "symbol":    symbol,
-                "side":      "short",
-                "price":     last_close,
-                "sl_price":  sl_price,
-                "tp_price":  tp_price,
-                "candle_ts": candle_ts,
-                "chop_val":  chop_val,
+                "symbol": symbol, "side": "short", "price": last_close,
+                "sl_price": sl_price, "tp_price": tp_price,
+                "candle_ts": candle_ts, "chop_val": chop_val,
+                "shadow_would_block": shadow_would_block,
+                "shadow_filters": shadow_label,
+                "shadow_atrpct": shadow_atrpct_val,
+                "shadow_adx": round(adx_val, 1),
+                "shadow_vol_ok": shadow_vol_ok,
+                "shadow_body_ok": shadow_body_ok,
+                "shadow_regime_ok": shadow_regime_ok,
+                "shadow_trend_ok": shadow_trend_ok,
+                "shadow_funding_ok": shadow_funding_ok,
             }
 
         return None
@@ -373,99 +353,107 @@ async def scan_symbol_tcp(exchange: ccxt_async.binance, config: dict) -> Optiona
         if pd.isna(rsi) or ema20 == 0 or ema50 == 0:
             return None
 
-        # Filtro micro-cap: tokens con precio muy bajo tienen ATR% desproporcionado
-        if last_close < 0.005:
-            logger.debug(f"[TCP] {symbol} precio muy bajo ({last_close:.6f}) — micro-cap filter")
-            return None
-
-        # Filtro de liquidez: volumen diario estimado < $20M USD → skip
-        vol_avg_20 = float(df["volume"].iloc[-22:-2].mean()) if len(df) >= 22 else last_vol
+        # Shadow: micro-cap y liquidez (se computan pero no bloquean)
+        vol_avg_20    = float(df["volume"].iloc[-22:-2].mean()) if len(df) >= 22 else last_vol
         daily_vol_usd = vol_avg_20 * 96 * last_close
-        if daily_vol_usd < TCP_MIN_DAILY_VOL:
-            logger.debug(f"[TCP] {symbol} liquidez insuficiente (${daily_vol_usd/1e6:.1f}M/día est.)")
-            return None
+        shadow_microcap_ok  = last_close >= 0.005
+        shadow_liquidity_ok = daily_vol_usd >= TCP_MIN_DAILY_VOL
 
-        # ── TCP LONG ──────────────────────────────────────────────────────────
+        # ── TCP LONG: EMA20 > EMA50 y precio toca EMA20 ───────────────────────
         if ema20 > ema50:
             touched = last_low <= ema20 * (1 + TCP_ZONE_PCT) and last_close >= ema20 * (1 - TCP_ZONE_PCT)
-            rsi_ok  = 40 <= rsi <= 55
-            green   = last_close > last_open
-            if touched and rsi_ok and green and vol_ok:
-                if adx_val < TCP_ADX_MIN:
-                    return {"symbol": symbol, "side": "long", "price": last_close,
-                            "sl_price": round(last_close - atr * TCP_SL_MULT, 6),
-                            "tp_price": round(last_close + atr * TCP_TP_MULT, 6),
-                            "candle_ts": candle_ts, "blocked_reason": f"adx_low|{adx_val:.1f}",
-                            "strategy": "tcp"}
-            if touched and rsi_ok and green and vol_ok and adx_val >= TCP_ADX_MIN:
+            if touched:
                 sl_price = round(last_close - atr * TCP_SL_MULT, 6)
                 tp_price = round(last_close + atr * TCP_TP_MULT, 6)
-                regime, chop_val = await _get_regime_1h(exchange, symbol)
-                if regime == "lateral":
-                    logger.info(f"[TCP] {symbol} LONG bloqueado: régimen lateral 1H CHOP={chop_val}")
-                    return {"symbol": symbol, "side": "long", "price": last_close,
-                            "sl_price": sl_price, "tp_price": tp_price,
-                            "candle_ts": candle_ts, "blocked_reason": "regime_lateral",
-                            "chop_val": chop_val, "strategy": "tcp"}
-                trend = await _get_1h_trend(exchange, symbol)
-                if trend == "down":
-                    logger.info(f"[TCP] {symbol} LONG bloqueado: 1H bajista CHOP={chop_val}")
-                    return {"symbol": symbol, "side": "long", "price": last_close,
-                            "sl_price": sl_price, "tp_price": tp_price,
-                            "candle_ts": candle_ts, "blocked_reason": "trend_1h_bearish",
-                            "chop_val": chop_val, "strategy": "tcp"}
-                funding = await _get_funding_rate(exchange, symbol)
-                if funding is not None and funding > FUNDING_LONG_BLOCK:
-                    logger.info(f"[TCP] {symbol} LONG bloqueado: funding={funding:.5f}")
-                    return {"symbol": symbol, "side": "long", "price": last_close,
-                            "sl_price": sl_price, "tp_price": tp_price,
-                            "candle_ts": candle_ts, "blocked_reason": f"funding_high|{funding:.5f}",
-                            "chop_val": chop_val, "strategy": "tcp"}
-                logger.info(f"[TCP] ✅ {symbol} LONG pullback entry={last_close} ema20={ema20:.4f} rsi={rsi:.1f} CHOP={chop_val}")
+
+                regime, chop_val  = await _get_regime_1h(exchange, symbol)
+                trend             = await _get_1h_trend(exchange, symbol)
+                funding           = await _get_funding_rate(exchange, symbol)
+
+                shadow_rsi_ok     = 40 <= rsi <= 55
+                shadow_green_ok   = last_close > last_open
+                shadow_vol_ok2    = vol_ok
+                shadow_adx_ok2    = adx_val >= TCP_ADX_MIN
+                shadow_regime_ok  = regime != "lateral"
+                shadow_trend_ok   = trend != "down"
+                shadow_funding_ok = funding is None or funding <= FUNDING_LONG_BLOCK
+
+                shadow_filters = [
+                    f"rsi={rsi:.0f}"              if not shadow_rsi_ok      else None,
+                    "no_green"                    if not shadow_green_ok    else None,
+                    "vol_low"                     if not shadow_vol_ok2     else None,
+                    f"adx={adx_val:.1f}"          if not shadow_adx_ok2    else None,
+                    "lateral"                     if not shadow_regime_ok   else None,
+                    "trend_down"                  if not shadow_trend_ok    else None,
+                    f"fund={funding:.5f}" if (funding and not shadow_funding_ok) else None,
+                    "microcap"                    if not shadow_microcap_ok  else None,
+                    f"liq={daily_vol_usd/1e6:.1f}M" if not shadow_liquidity_ok else None,
+                ]
+                shadow_label = "|".join(f for f in shadow_filters if f) or "ok"
+                shadow_would_block = shadow_label != "ok"
+
+                logger.info(
+                    f"[TCP] {'⚠️ SHADOW' if shadow_would_block else '✅'} {symbol} LONG "
+                    f"entry={last_close} ema20={ema20:.4f} rsi={rsi:.1f} shadow={shadow_label}"
+                )
                 return {"symbol": symbol, "side": "long", "price": last_close,
                         "sl_price": sl_price, "tp_price": tp_price,
-                        "candle_ts": candle_ts, "chop_val": chop_val, "strategy": "tcp"}
+                        "candle_ts": candle_ts, "chop_val": chop_val, "strategy": "tcp",
+                        "shadow_would_block": shadow_would_block,
+                        "shadow_filters": shadow_label,
+                        "shadow_adx": round(adx_val, 1),
+                        "shadow_vol_ok": shadow_vol_ok2,
+                        "shadow_regime_ok": shadow_regime_ok,
+                        "shadow_trend_ok": shadow_trend_ok,
+                        "shadow_funding_ok": shadow_funding_ok}
 
-        # ── TCP SHORT ─────────────────────────────────────────────────────────
+        # ── TCP SHORT: EMA20 < EMA50 y precio toca EMA20 ─────────────────────
         elif ema20 < ema50:
             touched = last_high >= ema20 * (1 - TCP_ZONE_PCT) and last_close <= ema20 * (1 + TCP_ZONE_PCT)
-            rsi_ok  = 45 <= rsi <= 60
-            red     = last_close < last_open
-            if touched and rsi_ok and red and vol_ok:
-                if adx_val < TCP_ADX_MIN:
-                    return {"symbol": symbol, "side": "short", "price": last_close,
-                            "sl_price": round(last_close + atr * TCP_SL_MULT, 6),
-                            "tp_price": round(last_close - atr * TCP_TP_MULT, 6),
-                            "candle_ts": candle_ts, "blocked_reason": f"adx_low|{adx_val:.1f}",
-                            "strategy": "tcp"}
-            if touched and rsi_ok and red and vol_ok and adx_val >= TCP_ADX_MIN:
+            if touched:
                 sl_price = round(last_close + atr * TCP_SL_MULT, 6)
                 tp_price = round(last_close - atr * TCP_TP_MULT, 6)
-                regime, chop_val = await _get_regime_1h(exchange, symbol)
-                if regime == "lateral":
-                    logger.info(f"[TCP] {symbol} SHORT bloqueado: régimen lateral 1H CHOP={chop_val}")
-                    return {"symbol": symbol, "side": "short", "price": last_close,
-                            "sl_price": sl_price, "tp_price": tp_price,
-                            "candle_ts": candle_ts, "blocked_reason": "regime_lateral",
-                            "chop_val": chop_val, "strategy": "tcp"}
-                trend = await _get_1h_trend(exchange, symbol)
-                if trend == "up":
-                    logger.info(f"[TCP] {symbol} SHORT bloqueado: 1H alcista CHOP={chop_val}")
-                    return {"symbol": symbol, "side": "short", "price": last_close,
-                            "sl_price": sl_price, "tp_price": tp_price,
-                            "candle_ts": candle_ts, "blocked_reason": "trend_1h_bullish",
-                            "chop_val": chop_val, "strategy": "tcp"}
-                funding = await _get_funding_rate(exchange, symbol)
-                if funding is not None and funding < FUNDING_SHORT_BLOCK:
-                    logger.info(f"[TCP] {symbol} SHORT bloqueado: funding={funding:.5f}")
-                    return {"symbol": symbol, "side": "short", "price": last_close,
-                            "sl_price": sl_price, "tp_price": tp_price,
-                            "candle_ts": candle_ts, "blocked_reason": f"funding_low|{funding:.5f}",
-                            "chop_val": chop_val, "strategy": "tcp"}
-                logger.info(f"[TCP] ✅ {symbol} SHORT pullback entry={last_close} ema20={ema20:.4f} rsi={rsi:.1f} CHOP={chop_val}")
+
+                regime, chop_val  = await _get_regime_1h(exchange, symbol)
+                trend             = await _get_1h_trend(exchange, symbol)
+                funding           = await _get_funding_rate(exchange, symbol)
+
+                shadow_rsi_ok     = 45 <= rsi <= 60
+                shadow_red_ok     = last_close < last_open
+                shadow_vol_ok2    = vol_ok
+                shadow_adx_ok2    = adx_val >= TCP_ADX_MIN
+                shadow_regime_ok  = regime != "lateral"
+                shadow_trend_ok   = trend != "up"
+                shadow_funding_ok = funding is None or funding >= FUNDING_SHORT_BLOCK
+
+                shadow_filters = [
+                    f"rsi={rsi:.0f}"              if not shadow_rsi_ok      else None,
+                    "no_red"                      if not shadow_red_ok      else None,
+                    "vol_low"                     if not shadow_vol_ok2     else None,
+                    f"adx={adx_val:.1f}"          if not shadow_adx_ok2    else None,
+                    "lateral"                     if not shadow_regime_ok   else None,
+                    "trend_up"                    if not shadow_trend_ok    else None,
+                    f"fund={funding:.5f}" if (funding and not shadow_funding_ok) else None,
+                    "microcap"                    if not shadow_microcap_ok  else None,
+                    f"liq={daily_vol_usd/1e6:.1f}M" if not shadow_liquidity_ok else None,
+                ]
+                shadow_label = "|".join(f for f in shadow_filters if f) or "ok"
+                shadow_would_block = shadow_label != "ok"
+
+                logger.info(
+                    f"[TCP] {'⚠️ SHADOW' if shadow_would_block else '✅'} {symbol} SHORT "
+                    f"entry={last_close} ema20={ema20:.4f} rsi={rsi:.1f} shadow={shadow_label}"
+                )
                 return {"symbol": symbol, "side": "short", "price": last_close,
                         "sl_price": sl_price, "tp_price": tp_price,
-                        "candle_ts": candle_ts, "chop_val": chop_val, "strategy": "tcp"}
+                        "candle_ts": candle_ts, "chop_val": chop_val, "strategy": "tcp",
+                        "shadow_would_block": shadow_would_block,
+                        "shadow_filters": shadow_label,
+                        "shadow_adx": round(adx_val, 1),
+                        "shadow_vol_ok": shadow_vol_ok2,
+                        "shadow_regime_ok": shadow_regime_ok,
+                        "shadow_trend_ok": shadow_trend_ok,
+                        "shadow_funding_ok": shadow_funding_ok}
 
         return None
     except Exception as e:
@@ -504,11 +492,10 @@ async def load_top50_symbols() -> list[dict]:
 
 
 async def scan_all(symbols: list[dict]) -> tuple[list[dict], list[dict]]:
-    """Corre Donchian 15m + TCP en paralelo. Retorna (senales_validas, bloqueadas)."""
+    """Corre Donchian 15m + TCP en paralelo. Retorna (señales, []) — shadow mode puro."""
     import asyncio
     exchange = _build_exchange()
     signals: list[dict] = []
-    blocked: list[dict] = []
     sem = asyncio.Semaphore(10)
 
     async def _scan_one(config: dict, scanner, strat: str) -> None:
@@ -521,10 +508,7 @@ async def scan_all(symbols: list[dict]) -> tuple[list[dict], list[dict]]:
             if sig is None:
                 return
             sig.setdefault("strategy", strat)
-            if "blocked_reason" in sig:
-                blocked.append(sig)
-            else:
-                signals.append(sig)
+            signals.append(sig)
 
     try:
         tasks = []
@@ -538,4 +522,4 @@ async def scan_all(symbols: list[dict]) -> tuple[list[dict], list[dict]]:
         except Exception:
             pass
 
-    return signals, blocked
+    return signals, []
