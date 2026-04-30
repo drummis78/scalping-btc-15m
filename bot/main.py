@@ -30,6 +30,7 @@ from bot.fundamental import fundamental_filter
 from bot.notifier import notifier
 import bot.macro_regime as macro_regime
 import bot.cvd_monitor as cvd_monitor
+import bot.ai_classifier as ai_classifier
 
 os.makedirs(os.path.dirname(settings.LOG_FILE), exist_ok=True)
 logging.basicConfig(
@@ -219,6 +220,19 @@ async def _process_signal(sig: dict):
     tbr = await cvd_monitor.get_tbr(symbol)
     cvd_would_block = cvd_monitor.would_block(side, tbr)
 
+    # AI Classifier — solo observación, nunca bloquea
+    _feat_atr_pct = abs(price - sl_price) / (1.5 * price) if sl_price and price else 0.0
+    _ai_feat = ai_classifier.features_for_signal(
+        side=side, strategy=strategy,
+        chop_val=chop_val or 50.0,
+        cvd_tbr=tbr, macro_regime=mr_regime,
+        impact_score=_fund_impact,
+        feat_atr_pct=_feat_atr_pct,
+        feat_vol_ratio=1.0, feat_body_pct=0.35,
+        ts=datetime.now(timezone.utc),
+    )
+    ai_score = ai_classifier.get_score(_ai_feat)
+
     # Ejecutar
     result = await binance_exchange.open_position(
         symbol, side, price, sl_price, tp_price, settings.MAX_LEVERAGE,
@@ -232,6 +246,10 @@ async def _process_signal(sig: dict):
     result_data["macro_would_block"]  = mr_would_block
     result_data["cvd_tbr"]            = tbr
     result_data["cvd_would_block"]    = cvd_would_block
+    result_data["ai_score"]           = ai_score
+    result_data["feat_atr_pct"]       = round(_feat_atr_pct, 4)
+    result_data["feat_vol_ratio"]     = 1.0
+    result_data["feat_body_pct"]      = 0.35
 
     await log_signal(ts, symbol, side, price, sl_price, tp_price,
                      _fund_allow, _fund_reason, _fund_impact,
@@ -302,6 +320,7 @@ async def _position_monitor():
                     result = await binance_exchange.close_position(symbol, side, close_price, reason,
                                                                    strategy=strat)
                     if result["status"] == "success":
+                        asyncio.create_task(ai_classifier.maybe_retrain(get_pool()))
                         # Verificar que la posición fue eliminada de DB (guard contra inconsistencia)
                         still_open = await get_position("binance", symbol, side, strat)
                         if still_open:
@@ -465,6 +484,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"[FUNDAMENTAL] FUNDAMENTAL_ENABLED={settings.FUNDAMENTAL_ENABLED!r}")
     await fundamental_filter.start()
     await macro_regime.start()
+    asyncio.create_task(ai_classifier.start(get_pool()))
 
     scanner_task    = asyncio.create_task(_signal_scanner())
     monitor_task    = asyncio.create_task(_position_monitor())
@@ -772,6 +792,19 @@ async def dashboard():
             if 'would_win' in rj:
                 return '<span style="color:#ff5252;font-size:11px" title="Filtro erró — hubiera ganado">✗ Error</span>'
             return '<span style="color:#555;font-size:11px">⏳ Pendiente</span>'
+        def _ai_score_cell(s):
+            rj = {}
+            try:
+                rj = json.loads(s.get('result_json') or '{}')
+            except Exception:
+                pass
+            score = rj.get('ai_score')
+            if score is None:
+                return '<td style="font-size:10px;color:#444">—</td>'
+            pct = round(score * 100)
+            color = "#00e676" if pct >= 60 else ("#ffd740" if pct >= 45 else "#ff5252")
+            return f'<td style="font-size:11px;font-weight:bold;color:{color}">{pct}%</td>'
+
         rows = []
         for s in items:
             rows.append(f"""<tr data-strat="{s.get('strategy','')}">
@@ -782,6 +815,7 @@ async def dashboard():
             <td>${(s.get('price') or 0):,.4f}</td>
             <td style="color:{'#00e676' if s.get('verdict')=='executed' else '#ffa500'}">{(s.get('verdict') or '').replace('_',' ').upper()}</td>
             <td style="font-size:10px;color:#888">{(s.get('fund_reason') or '')[:50]}</td>
+            {_ai_score_cell(s)}
             <td>{_outcome_badge(s)}</td>
         </tr>""")
         return "".join(rows) or "<tr><td colspan=8 style='color:#555;text-align:center;padding:20px'>Sin senales aun</td></tr>"
@@ -1132,6 +1166,26 @@ async def dashboard():
         </div>
       </div>""")()}
 
+      <!-- AI Classifier Monitor -->
+      {(lambda am=ai_classifier.get_meta(): f"""
+      <div style="background:#161616;border:1px solid #222;border-radius:10px;padding:16px;flex:1;min-width:260px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <span style="font-weight:bold;font-size:13px;color:#aaa">XGBoost AI Classifier</span>
+          <span style="font-size:10px;padding:2px 6px;border-radius:4px;background:{'#00e67622' if am['accuracy'] else '#55555522'};color:{'#00e676' if am['accuracy'] else '#555'}">{'ACTIVO' if am['accuracy'] else 'ENTRENANDO'}</span>
+        </div>
+        <div style="font-size:11px;color:#666;margin-bottom:12px">{am['status']}</div>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px">
+          <div><div style="font-size:16px;font-weight:bold;color:#00bcd4">{f"{am['accuracy']*100:.1f}%" if am['accuracy'] else "—"}</div><div style="font-size:10px;color:#555">accuracy</div></div>
+          <div><div style="font-size:16px;font-weight:bold;color:#9c27b0">{f"{am['f1']*100:.1f}%" if am['f1'] else "—"}</div><div style="font-size:10px;color:#555">F1 score</div></div>
+          <div><div style="font-size:16px;font-weight:bold;color:#ffd740">{am['n_samples']}</div><div style="font-size:10px;color:#555">muestras</div></div>
+          <div><div style="font-size:16px;font-weight:bold;color:#aaa">{am['trades_since_retrain']}</div><div style="font-size:10px;color:#555">trades nuevos</div></div>
+        </div>
+        {f'''<div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Feature importances</div>
+        <div style="display:flex;flex-direction:column;gap:3px">
+          {"".join(f'<div style="display:flex;gap:6px;align-items:center"><span style="font-size:10px;color:#666;width:80px;flex-shrink:0">{k}</span><div style="height:4px;border-radius:2px;background:#00bcd4;width:{min(v*300,100):.0f}px"></div><span style="font-size:9px;color:#444">{v:.3f}</span></div>' for k,v in sorted(am["feature_importances"].items(), key=lambda x: -x[1])[:6])}
+        </div>''' if am['feature_importances'] else ''}
+      </div>""")()}
+
     </div>
 
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:8px">
@@ -1155,7 +1209,7 @@ async def dashboard():
     <tbody>{rows_trades(trades)}</tbody></table>
 
     <h2>Bitacora de senales (ultimas 50)</h2>
-    <table id="tbl-sig"><thead><tr><th>Hora</th><th>Estrategia</th><th>Simbolo</th><th>Lado</th><th>Precio</th><th>Veredicto</th><th>Razon</th><th>Resultado Filtro</th></tr></thead>
+    <table id="tbl-sig"><thead><tr><th>Hora</th><th>Estrategia</th><th>Simbolo</th><th>Lado</th><th>Precio</th><th>Veredicto</th><th>Razon</th><th>AI Score</th><th>Resultado Filtro</th></tr></thead>
     <tbody>{rows_signals(signals)}</tbody></table>
 
     <h2>Cooldown — Racha de pérdidas</h2>
