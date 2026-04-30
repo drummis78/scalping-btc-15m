@@ -417,28 +417,10 @@ class FundamentalFilter:
             return False, "no_short", f"groq_no_short|{short_reason}"
         return False, None, f"groq_ok|{short_reason}"
 
-    async def _ai_groq_decision(self, side: str, macro_regime: str,
-                                 max_impact: float, avg_sent: float,
-                                 event_count: int) -> tuple:
-        """
-        Llama a Groq llama-3.3-70b-versatile con contexto completo.
-        Retorna (would_block, direction_filter, label, confidence).
-        Cache de 5 minutos. Fallback a _compute_shadow_decision en error.
-        """
-        if not settings.GROQ_API_KEY:
-            block, direction, label = self._compute_shadow_decision(max_impact, avg_sent, event_count)
-            return block, direction, label, 0.0
-
+    async def _call_groq_background(self, macro_regime: str, max_impact: float,
+                                      avg_sent: float, event_count: int) -> None:
+        """Llama a Groq en background y actualiza el cache. Nunca bloquea el caller."""
         now = datetime.now(timezone.utc)
-
-        # Cache hit
-        if (self._groq_cache is not None and self._groq_cache_ts is not None and
-                (now - self._groq_cache_ts).total_seconds() < GROQ_CACHE_SECS):
-            c_action, c_reason, c_conf = self._groq_cache
-            logger.debug(f"[FUNDAMENTAL] Groq cache hit: {c_action} (conf={c_conf:.2f})")
-            return self._groq_action_to_tuple(c_action, c_reason, c_conf, side)
-
-        # Build context block
         fg_str    = (f"{self._last_fear_greed['value']:.0f} ({self._last_fear_greed['label']})"
                      if self._last_fear_greed else "N/A")
         fomc_info = self._nearest_event_info(FOMC_DATES, "T18:00:00+00:00", "FOMC")
@@ -469,14 +451,13 @@ class FundamentalFilter:
             f"{cpi_info}\n\n"
             f"Noticias relevantes (últimas 6h):\n{news_lines}\n\n"
             f"Estadísticas: impacto_max={max_impact:.1f} | "
-            f"sentimiento_avg={avg_sent:.2f} | eventos={event_count}\n\n"
-            f"Trade propuesto: {side.upper()}"
+            f"sentimiento_avg={avg_sent:.2f} | eventos={event_count}"
         )
 
         try:
             client = AsyncOpenAI(api_key=settings.GROQ_API_KEY,
                                  base_url="https://api.groq.com/openai/v1",
-                                 timeout=8.0)
+                                 timeout=15.0)
             resp = await client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 max_tokens=150,
@@ -487,7 +468,6 @@ class FundamentalFilter:
                 ],
             )
             raw = resp.choices[0].message.content.strip()
-            # Strip posible markdown code fence
             if raw.startswith("```"):
                 parts = raw.split("```")
                 raw = parts[1] if len(parts) > 1 else raw
@@ -497,16 +477,41 @@ class FundamentalFilter:
             action     = parsed.get("action", "ok")
             reason     = parsed.get("reason", "")
             confidence = float(parsed.get("confidence", 0.5))
-
             self._groq_cache    = (action, reason, confidence)
             self._groq_cache_ts = now
-            logger.info(f"[FUNDAMENTAL] Groq → {action} (conf={confidence:.2f}) | {reason}")
-            return self._groq_action_to_tuple(action, reason, confidence, side)
-
+            logger.info(f"[FUNDAMENTAL] Groq (bg) → {action} (conf={confidence:.2f}) | {reason}")
         except Exception as e:
-            logger.warning(f"[FUNDAMENTAL] Groq error: {e} — fallback a reglas")
+            logger.warning(f"[FUNDAMENTAL] Groq background error: {e}")
+
+    async def _ai_groq_decision(self, side: str, macro_regime: str,
+                                 max_impact: float, avg_sent: float,
+                                 event_count: int) -> tuple:
+        """
+        Retorna decisión shadow SIN bloquear el signal processing.
+        - Cache hit → usa resultado anterior (instantáneo)
+        - Cache miss → devuelve reglas ahora + dispara Groq en background
+          El próximo signal (dentro de 5 min) ya tendrá el resultado de Groq.
+        """
+        if not settings.GROQ_API_KEY:
             block, direction, label = self._compute_shadow_decision(max_impact, avg_sent, event_count)
             return block, direction, label, 0.0
+
+        now = datetime.now(timezone.utc)
+
+        # Cache hit → respuesta instantánea con decisión de Groq
+        if (self._groq_cache is not None and self._groq_cache_ts is not None and
+                (now - self._groq_cache_ts).total_seconds() < GROQ_CACHE_SECS):
+            c_action, c_reason, c_conf = self._groq_cache
+            logger.debug(f"[FUNDAMENTAL] Groq cache hit: {c_action} (conf={c_conf:.2f})")
+            return self._groq_action_to_tuple(c_action, c_reason, c_conf, side)
+
+        # Cache miss → reglas ahora, Groq en background para próxima señal
+        asyncio.create_task(
+            self._call_groq_background(macro_regime, max_impact, avg_sent, event_count)
+        )
+        logger.debug("[FUNDAMENTAL] Groq cache miss — usando reglas, Groq corriendo en background")
+        block, direction, label = self._compute_shadow_decision(max_impact, avg_sent, event_count)
+        return block, direction, label, 0.0
 
     # ── Shadow decision matrix (fallback / sin Groq key) ─────────────────────
 
