@@ -186,27 +186,35 @@ async def _process_signal(sig: dict):
                          chop_val=chop_val)
         return
 
-    # Fundamental filter — shadow mode (nunca bloquea, solo observa)
-    fund = await fundamental_filter.check(symbol)
-    _fund_reason       = fund["reason"]
-    _fund_impact       = fund.get("impact_score", 0.0)
-    _fund_shadow_block = fund.get("shadow_would_block", False)
-    _fund_shadow_dir   = fund.get("shadow_direction")   # "no_long" | "no_short" | None
-    _fund_shadow_label = fund.get("shadow_label", "ok")
-    # Si la dirección es "no_long" y el trade es LONG, o "no_short" y es SHORT → habría bloqueado
-    _fund_shadow_trade = (
-        _fund_shadow_block or
-        (_fund_shadow_dir == "no_long"  and side == "long") or
-        (_fund_shadow_dir == "no_short" and side == "short")
-    )
-    logger.info(f"[FUNDAMENTAL] {symbol}: {_fund_reason} | shadow={'block' if _fund_shadow_trade else (_fund_shadow_dir or 'ok')}")
-
     # Régimen macro — solo observación, nunca bloquea
     mr = macro_regime.get_regime()
     mr_regime = mr.get("regime", "unknown")
     mr_would_block = (
         (side == "long"  and mr_regime == "bear") or
         (side == "short" and mr_regime == "bull")
+    )
+
+    # Fundamental filter — shadow mode (nunca bloquea, solo observa)
+    # Pasa side y macro_regime para que Groq tenga contexto completo
+    fund = await fundamental_filter.check(symbol, side=side, macro_regime=mr_regime)
+    _fund_reason       = fund["reason"]
+    _fund_impact       = fund.get("impact_score", 0.0)
+    _fund_shadow_block = fund.get("shadow_would_block", False)
+    _fund_shadow_dir   = fund.get("shadow_direction")   # "no_long" | "no_short" | None
+    _fund_shadow_label = fund.get("shadow_label", "ok")
+    _fund_groq_action  = fund.get("groq_action", "")
+    _fund_groq_reason  = fund.get("groq_reason", "")
+    _fund_groq_conf    = fund.get("groq_confidence", 0.0)
+    # Si la dirección es "no_long" y el trade es LONG, o "no_short" y es SHORT → habría bloqueado
+    _fund_shadow_trade = (
+        _fund_shadow_block or
+        (_fund_shadow_dir == "no_long"  and side == "long") or
+        (_fund_shadow_dir == "no_short" and side == "short")
+    )
+    logger.info(
+        f"[FUNDAMENTAL] {symbol}: {_fund_reason} | "
+        f"groq={_fund_groq_action}(conf={_fund_groq_conf:.2f}) | "
+        f"shadow={'block' if _fund_shadow_trade else (_fund_shadow_dir or 'ok')}"
     )
 
     # CVD / TBR — solo observación, nunca bloquea
@@ -246,6 +254,9 @@ async def _process_signal(sig: dict):
     result_data["fund_shadow_would_block"] = _fund_shadow_trade
     result_data["fund_shadow_direction"]   = _fund_shadow_dir
     result_data["fund_shadow_label"]       = _fund_shadow_label
+    result_data["groq_action"]             = _fund_groq_action
+    result_data["groq_reason"]             = _fund_groq_reason
+    result_data["groq_confidence"]         = _fund_groq_conf
 
     await log_signal(ts, symbol, side, price, sl_price, tp_price,
                      _fund_allow, _fund_reason, _fund_impact,
@@ -687,6 +698,40 @@ async def dashboard():
                          AND result_json LIKE '%sl_hit%' THEN 1 ELSE 0 END) wblock_losses
             FROM signal_log WHERE verdict='executed'
         """))
+        # Groq last decision (última señal ejecutada con groq_action)
+        groq_last = await conn.fetchrow("""
+            SELECT result_json FROM signal_log
+            WHERE verdict='executed' AND result_json LIKE '%groq_action%'
+            ORDER BY ts DESC LIMIT 1
+        """)
+        groq_last_action = "—"
+        groq_last_reason = ""
+        groq_last_conf   = 0.0
+        if groq_last and groq_last["result_json"]:
+            try:
+                _gd = json.loads(groq_last["result_json"])
+                groq_last_action = _gd.get("groq_action", "—")
+                groq_last_reason = _gd.get("groq_reason", "")
+                groq_last_conf   = float(_gd.get("groq_confidence", 0.0))
+            except Exception:
+                pass
+        # Groq accuracy stats (cuándo groq_block/no_long/no_short hubiera bloqueado)
+        groq_stats = dict(await conn.fetchrow("""
+            SELECT
+                COUNT(*) total,
+                SUM(CASE WHEN (result_json LIKE '%"groq_action": "block"%'
+                           OR result_json LIKE '%"groq_action": "no_long"%'
+                           OR result_json LIKE '%"groq_action": "no_short"%') THEN 1 ELSE 0 END) would_block,
+                SUM(CASE WHEN (result_json LIKE '%"groq_action": "block"%'
+                           OR result_json LIKE '%"groq_action": "no_long"%'
+                           OR result_json LIKE '%"groq_action": "no_short"%')
+                         AND result_json LIKE '%tp_hit%' THEN 1 ELSE 0 END) wblock_wins,
+                SUM(CASE WHEN (result_json LIKE '%"groq_action": "block"%'
+                           OR result_json LIKE '%"groq_action": "no_long"%'
+                           OR result_json LIKE '%"groq_action": "no_short"%')
+                         AND result_json LIKE '%sl_hit%' THEN 1 ELSE 0 END) wblock_losses
+            FROM signal_log WHERE verdict='executed'
+        """))
         # CVD shadow stats
         cvd_shadow = dict(await conn.fetchrow("""
             SELECT
@@ -1116,7 +1161,6 @@ async def dashboard():
             </div>
         </div>
         <div style="display:flex;align-items:center;gap:16px">
-            <a href="/analytics" style="padding:7px 14px;border-radius:8px;border:1px solid #00bcd444;background:#00bcd40d;color:#00bcd4;font-size:11px;font-weight:bold;text-decoration:none">📊 Analytics</a>
             <div style="text-align:right">
                 <div class="lbl">Balance</div>
                 <div class="val">${bal:,.2f}</div>
@@ -1210,18 +1254,25 @@ async def dashboard():
       </div>""")()}
 
       <!-- Fundamental Shadow Monitor -->
-      {(lambda fs=fund_shadow: f"""
+      {(lambda fs=fund_shadow, gs=groq_stats, gla=groq_last_action, glr=groq_last_reason, glc=groq_last_conf: f"""
       <div style="background:#161616;border:1px solid #222;border-radius:10px;padding:16px;flex:1;min-width:260px">
-        <div style="margin-bottom:12px">
-          <span style="font-weight:bold;font-size:13px;color:#aaa">Filtro Fundamental Avanzado</span>
-          <div style="font-size:10px;color:#555;margin-top:4px">FOMC/CPI window · Sentiment direction · Impact crítico</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <span style="font-weight:bold;font-size:13px;color:#aaa">Fundamental + Groq AI</span>
+          <span style="font-size:10px;padding:2px 6px;border-radius:4px;background:{'#00e67622' if gla not in ('—','disabled','') else '#55555522'};color:{'#00e676' if gla not in ('—','disabled','') else '#555'}">{'GROQ' if gla not in ('—','disabled','') else 'REGLAS'}</span>
         </div>
-        <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Si estuviera activo hubiera...</div>
+        <div style="font-size:10px;color:#555;margin-bottom:8px">FOMC/CPI window · Sentiment · LLaMA 3.3-70B</div>
+        {"" if gla in ('—','disabled','') else f'<div style="background:#0d1117;border-radius:6px;padding:8px;margin-bottom:10px"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:11px;font-weight:bold;color:' + ("#ff5252" if gla=="block" else "#ffab40" if "no_" in gla else "#00e676") + '">' + gla.upper() + '</span><span style="font-size:10px;color:#555">conf={glc:.0%}</span></div>' + (f\'<div style="font-size:9px;color:#666;margin-top:3px">{glr[:80]}</div>\' if glr else "") + "</div>"}
+        <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Groq hubiera bloqueado...</div>
+        <div style="display:flex;gap:16px;margin-bottom:10px">
+          <div><div style="font-size:16px;font-weight:bold;color:#ff5252">{gs.get('would_block',0)}</div><div style="font-size:10px;color:#555">bloqueado</div></div>
+          <div><div style="font-size:16px;font-weight:bold;color:#00e676">{gs.get('wblock_wins',0)}</div><div style="font-size:10px;color:#555">eran wins</div></div>
+          <div><div style="font-size:16px;font-weight:bold;color:#aaa">{gs.get('wblock_losses',0)}</div><div style="font-size:10px;color:#555">eran losses</div></div>
+        </div>
+        <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Reglas shadow hubiera bloqueado...</div>
         <div style="display:flex;gap:16px">
-          <div><div style="font-size:16px;font-weight:bold;color:#ff5252">{fs.get('would_block',0)}</div><div style="font-size:10px;color:#555">bloqueado</div></div>
-          <div><div style="font-size:16px;font-weight:bold;color:#00e676">{fs.get('wblock_wins',0)}</div><div style="font-size:10px;color:#555">eran wins</div></div>
+          <div><div style="font-size:16px;font-weight:bold;color:#ff7043">{fs.get('would_block',0)}</div><div style="font-size:10px;color:#555">bloqueado</div></div>
+          <div><div style="font-size:16px;font-weight:bold;color:#69f0ae">{fs.get('wblock_wins',0)}</div><div style="font-size:10px;color:#555">eran wins</div></div>
           <div><div style="font-size:16px;font-weight:bold;color:#aaa">{fs.get('wblock_losses',0)}</div><div style="font-size:10px;color:#555">eran losses</div></div>
-          <div><div style="font-size:16px;font-weight:bold;color:#ffd740">{fs.get('total',0)}</div><div style="font-size:10px;color:#555">señales totales</div></div>
         </div>
       </div>""")()}
 
@@ -1232,6 +1283,7 @@ async def dashboard():
             <button class="tab active" onclick="filterTab('all',this)">Todas</button>
             <button class="tab" onclick="filterTab('donchian',this)" style="border-color:#00bcd444;color:#00bcd4">15m Donchian</button>
             <button class="tab" onclick="filterTab('tcp',this)" style="border-color:#ff980044;color:#ff9800">TCP 15m</button>
+            <button class="tab" onclick="filterTab('analytics',this)" style="border-color:#9c27b044;color:#9c27b0">📊 Analytics</button>
             </div>
         <div style="display:flex;gap:8px">
             <button onclick="resetBot('15m')" style="padding:7px 14px;border-radius:8px;border:1px solid #ff525244;background:#ff52520d;color:#ff5252;cursor:pointer;font-size:11px;font-weight:bold">🗑 Reset 15m Bot</button>
@@ -1239,6 +1291,7 @@ async def dashboard():
         </div>
     </div>
 
+    <div id="dash-main">
     <h2>Posiciones abiertas ({len(pos)})</h2>
     <table id="tbl-pos"><thead><tr><th>Estrategia</th><th>Simbolo</th><th>Lado</th><th>Entry</th><th>Precio</th><th>PnL Bruto</th><th>Fees</th><th>PnL Neto</th><th>SL</th><th>TP</th><th>Lev</th><th>Abierto</th></tr></thead>
     <tbody>{rows_pos(pos)}</tbody></table>
@@ -1303,6 +1356,13 @@ async def dashboard():
     <tbody>{rows_chop_analysis()}</tbody></table>
 
     <div class="refresh-note">Auto-refresh cada 60s</div>
+    </div><!-- /dash-main -->
+
+    <div id="analytics-section" style="display:none;margin-top:8px">
+      <iframe id="anl-frame"
+        style="width:100%;height:calc(100vh - 185px);border:none;border-radius:10px;background:#111"
+        data-src="/analytics">
+      </iframe>
     </div>
 
     <div id="_modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.75);z-index:9999;align-items:center;justify-content:center">
@@ -1327,12 +1387,23 @@ async def dashboard():
         _activeTab = strat;
         document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
-        ['tbl-pos','tbl-trades','tbl-sig'].forEach(id => {{
-            document.querySelectorAll('#'+id+' tbody tr[data-strat]').forEach(row => {{
-                if (strat === 'all' || row.dataset.strat === strat) row.classList.remove('hidden');
-                else row.classList.add('hidden');
+        const dashMain = document.getElementById('dash-main');
+        const anlSection = document.getElementById('analytics-section');
+        if (strat === 'analytics') {{
+            dashMain.style.display = 'none';
+            anlSection.style.display = 'block';
+            const iframe = document.getElementById('anl-frame');
+            if (!iframe.src) iframe.src = iframe.dataset.src;
+        }} else {{
+            dashMain.style.display = 'block';
+            anlSection.style.display = 'none';
+            ['tbl-pos','tbl-trades','tbl-sig'].forEach(id => {{
+                document.querySelectorAll('#'+id+' tbody tr[data-strat]').forEach(row => {{
+                    if (strat === 'all' || row.dataset.strat === strat) row.classList.remove('hidden');
+                    else row.classList.add('hidden');
+                }});
             }});
-        }});
+        }}
     }}
     const _hasSecret = {'true' if settings.WEBHOOK_SECRET else 'false'};
     let _mok = null;

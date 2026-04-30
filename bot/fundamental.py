@@ -32,6 +32,7 @@ IMPACT_REDUCE_THRESHOLD  = 4.0
 FEAR_GREED_EXTREME_FEAR  = 20
 FEAR_GREED_EXTREME_GREED = 82
 IMPACT_WINDOW_HOURS      = 12
+GROQ_CACHE_SECS          = 300  # 5 min — evita calls duplicadas en el mismo ciclo de scan
 
 NEWSAPI_QUERY = (
     "bitcoin OR BTC OR crypto OR ethereum OR "
@@ -85,11 +86,25 @@ ETF aprobado, adopción institucional → impact alto, sentiment positivo.
 FOMC, CPI, datos macro importantes → impact 6-8.
 Noticias de precio, predicciones, análisis → impact bajo (< 3)."""
 
+_GROQ_REASONING_SYSTEM = """Sos un analista de riesgo para trading de crypto en futuros perpetuos (15 minutos).
+Dado el contexto macro y de noticias, decidí si es seguro operar en este momento.
+Respondé SOLO con JSON válido (sin markdown, sin texto extra):
+{"action": "ok" | "no_long" | "no_short" | "block", "reason": "<1 oración concisa>", "confidence": <0.0 a 1.0>}
+
+Reglas de decisión:
+- "block": Evento macro crítico activo — FOMC en ventana -4h/+2h, CPI en ventana -1h/+2h, noticias impacto >= 8, crisis sistémica, hack de exchange
+- "no_long": Sentimiento claramente bajista pero no catastrófico — bear macro, noticias regulatorias negativas, fear extremo
+- "no_short": Sentimiento claramente alcista — bull market fuerte, noticias institucionales positivas, greed extremo
+- "ok": Sin señales de riesgo claras — operar normal
+- confidence: certeza de la decisión (0.0=muy inseguro, 1.0=muy seguro)"""
+
 
 class FundamentalFilter:
     def __init__(self):
         self._last_fear_greed: Optional[dict] = None
         self._poll_task: Optional[asyncio.Task] = None
+        self._groq_cache: Optional[tuple] = None        # (action, reason, confidence)
+        self._groq_cache_ts: Optional[datetime] = None
 
     async def start(self):
         if not settings.FUNDAMENTAL_ENABLED:
@@ -371,7 +386,128 @@ class FundamentalFilter:
         except Exception as e:
             logger.error(f"[FUNDAMENTAL] Error insertando eventos ({source_label}): {e}")
 
-    # ── Shadow decision matrix (nunca bloquea, solo observa) ─────────────────
+    # ── Groq AI reasoning layer ───────────────────────────────────────────────
+
+    def _nearest_event_info(self, dates: list, time_suffix: str, label: str) -> str:
+        """Retorna string con proximidad al evento más cercano."""
+        now = datetime.now(timezone.utc)
+        nearest_delta = None
+        nearest_date  = None
+        for date_str in dates:
+            event_dt = datetime.fromisoformat(date_str + time_suffix)
+            delta_h  = (event_dt - now).total_seconds() / 3600
+            if nearest_delta is None or abs(delta_h) < abs(nearest_delta):
+                nearest_delta = delta_h
+                nearest_date  = date_str
+        if nearest_delta is None:
+            return f"{label}: N/A"
+        if nearest_delta > 0:
+            return f"{label}: en {nearest_delta:.1f}h ({nearest_date})"
+        return f"{label}: hace {abs(nearest_delta):.1f}h ({nearest_date})"
+
+    def _groq_action_to_tuple(self, action: str, reason: str, confidence: float,
+                               side: str) -> tuple:
+        """Convierte acción Groq a (would_block, direction_filter, label)."""
+        short_reason = (reason or "")[:60]
+        if action == "block":
+            return True,  None,       f"groq_block|{short_reason}"
+        if action == "no_long":
+            return False, "no_long",  f"groq_no_long|{short_reason}"
+        if action == "no_short":
+            return False, "no_short", f"groq_no_short|{short_reason}"
+        return False, None, f"groq_ok|{short_reason}"
+
+    async def _ai_groq_decision(self, side: str, macro_regime: str,
+                                 max_impact: float, avg_sent: float,
+                                 event_count: int) -> tuple:
+        """
+        Llama a Groq llama-3.3-70b-versatile con contexto completo.
+        Retorna (would_block, direction_filter, label, confidence).
+        Cache de 5 minutos. Fallback a _compute_shadow_decision en error.
+        """
+        if not settings.GROQ_API_KEY:
+            block, direction, label = self._compute_shadow_decision(max_impact, avg_sent, event_count)
+            return block, direction, label, 0.0
+
+        now = datetime.now(timezone.utc)
+
+        # Cache hit
+        if (self._groq_cache is not None and self._groq_cache_ts is not None and
+                (now - self._groq_cache_ts).total_seconds() < GROQ_CACHE_SECS):
+            c_action, c_reason, c_conf = self._groq_cache
+            logger.debug(f"[FUNDAMENTAL] Groq cache hit: {c_action} (conf={c_conf:.2f})")
+            return self._groq_action_to_tuple(c_action, c_reason, c_conf, side)
+
+        # Build context block
+        fg_str    = (f"{self._last_fear_greed['value']:.0f} ({self._last_fear_greed['label']})"
+                     if self._last_fear_greed else "N/A")
+        fomc_info = self._nearest_event_info(FOMC_DATES, "T18:00:00+00:00", "FOMC")
+        cpi_info  = self._nearest_event_info(CPI_DATES,  "T13:30:00+00:00", "CPI")
+
+        try:
+            cutoff = (now - timedelta(hours=6)).isoformat()
+            async with get_pool().acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT title, source, impact, sentiment FROM fundamental_events "
+                    "WHERE ts >= $1 AND category != 'sentiment' "
+                    "ORDER BY impact DESC LIMIT 10",
+                    cutoff,
+                )
+            news_lines = "\n".join(
+                f"  [{r['source']}] {r['title']} "
+                f"(impact={float(r['impact']):.1f}, sent={float(r['sentiment']):.2f})"
+                for r in rows
+            ) or "  (sin noticias recientes)"
+        except Exception:
+            news_lines = "  (error obteniendo noticias)"
+
+        context = (
+            f"Contexto de mercado — {now.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+            f"Fear & Greed Index: {fg_str}\n"
+            f"Macro Regime (Bitcoin): {macro_regime}\n"
+            f"{fomc_info}\n"
+            f"{cpi_info}\n\n"
+            f"Noticias relevantes (últimas 6h):\n{news_lines}\n\n"
+            f"Estadísticas: impacto_max={max_impact:.1f} | "
+            f"sentimiento_avg={avg_sent:.2f} | eventos={event_count}\n\n"
+            f"Trade propuesto: {side.upper()}"
+        )
+
+        try:
+            client = AsyncOpenAI(api_key=settings.GROQ_API_KEY,
+                                 base_url="https://api.groq.com/openai/v1")
+            resp = await client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                max_tokens=150,
+                temperature=0.1,
+                messages=[
+                    {"role": "system", "content": _GROQ_REASONING_SYSTEM},
+                    {"role": "user",   "content": context},
+                ],
+            )
+            raw = resp.choices[0].message.content.strip()
+            # Strip posible markdown code fence
+            if raw.startswith("```"):
+                parts = raw.split("```")
+                raw = parts[1] if len(parts) > 1 else raw
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            parsed     = json.loads(raw)
+            action     = parsed.get("action", "ok")
+            reason     = parsed.get("reason", "")
+            confidence = float(parsed.get("confidence", 0.5))
+
+            self._groq_cache    = (action, reason, confidence)
+            self._groq_cache_ts = now
+            logger.info(f"[FUNDAMENTAL] Groq → {action} (conf={confidence:.2f}) | {reason}")
+            return self._groq_action_to_tuple(action, reason, confidence, side)
+
+        except Exception as e:
+            logger.warning(f"[FUNDAMENTAL] Groq error: {e} — fallback a reglas")
+            block, direction, label = self._compute_shadow_decision(max_impact, avg_sent, event_count)
+            return block, direction, label, 0.0
+
+    # ── Shadow decision matrix (fallback / sin Groq key) ─────────────────────
 
     def _compute_shadow_decision(self, max_impact: float, avg_sent: float,
                                   event_count: int) -> tuple:
@@ -411,11 +547,15 @@ class FundamentalFilter:
 
     # ── Check (llamado por _process_signal) ───────────────────────────────────
 
-    async def check(self, symbol: str = "BTC") -> dict:
+    async def check(self, symbol: str = "BTC", side: str = "long",
+                    macro_regime: str = "unknown") -> dict:
         _shadow_defaults = {
             "shadow_would_block": False,
             "shadow_direction":   None,
             "shadow_label":       "disabled",
+            "groq_action":        "disabled",
+            "groq_reason":        "",
+            "groq_confidence":    0.0,
         }
 
         if not settings.FUNDAMENTAL_ENABLED:
@@ -438,9 +578,21 @@ class FundamentalFilter:
         fg_label    = self._last_fear_greed["label"] if self._last_fear_greed else "N/A"
         reason_base = f"F&G={fg_value:.0f}({fg_label}) | impact={max_impact:.1f} | events={event_count}"
 
-        # Shadow decision (nunca bloquea — solo para observación en dashboard)
-        s_block, s_dir, s_label = self._compute_shadow_decision(max_impact, avg_sent, event_count)
-        shadow = {"shadow_would_block": s_block, "shadow_direction": s_dir, "shadow_label": s_label}
+        # Shadow decision — Groq si hay key, sino fallback a reglas
+        s_block, s_dir, s_label, s_conf = await self._ai_groq_decision(
+            side, macro_regime, max_impact, avg_sent, event_count
+        )
+        # Extraer groq_action limpio del label
+        groq_action = s_label.split("|")[0] if "|" in s_label else s_label
+        groq_reason = s_label.split("|", 1)[1] if "|" in s_label else ""
+        shadow = {
+            "shadow_would_block": s_block,
+            "shadow_direction":   s_dir,
+            "shadow_label":       s_label,
+            "groq_action":        groq_action,
+            "groq_reason":        groq_reason,
+            "groq_confidence":    round(s_conf, 3),
+        }
 
         if fg_value >= FEAR_GREED_EXTREME_GREED:
             return {"allow": True, "reduce_size": True, "boost_size": False,
