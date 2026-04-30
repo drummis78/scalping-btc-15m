@@ -1,0 +1,28 @@
+# PUSHEO.MEM — Registro de deploys
+# Formato: [timestamp ART] | repo | commit | descripción
+
+---
+
+## 2026-04-30
+
+[04:29 ART] | scalping-btc-15m | 07e49c5 | fix: AI classifier usa fund_impact en lugar de columna inexistente impact_score
+[04:11 ART] | scalping-btc-15m | ebaf72d | fix: eliminar panel Filtro Fundamental duplicado del dashboard
+[04:04 ART] | scalping-btc-15m | e3421b2 | fix: Groq nunca bloquea signal processing — fire-and-forget background
+[04:03 ART] | scalping-btc-15m | 2d43760 | fix: NameError _fund_allow + timeout Groq + analytics link en tab
+[00:16 ART] | scalping-btc-15m | 6aaea32 | fix: SyntaxError en widget Groq — reemplazar f-string anidado con funcion _groq_card
+[00:10 ART] | scalping-btc-15m | b442075 | feat: Groq AI shadow layer + analytics tab in dashboard
+
+[04:27 ART] | dashboard-general | 7b47990 | fix: analytics button opens /analytics in new tab (auth bypass)
+[04:16 ART] | dashboard-general | bb44d14 | fix: analytics tab load /analytics instead of /dashboard
+
+## 2026-04-30 (sesión tarde)
+
+[08:29 ART] | scalping-btc-15m | 07e49c5 | fix: AI classifier fund_impact column
+[08:41 ART] | scalping-btc-15m | b7a5cfa | fix: mover boton Analytics al header del dashboard
+[08:50 ART] | scalping-btc-15m | 0b14518 | feat: scanner shadow mode (REVERTIDO luego)
+[08:57 ART] | scalping-btc-15m | 3b94994 | revert: restaurar scanner.py al estado de ayer
+[08:57 ART] | scalping-btc-15m | 3c40522 | revert: volver estado ayer 12hs (548256b) — sin shadow monitors + backlog.mem
+
+[08:41 ART] | dashboard-general | 22af174 | fix: eliminar tab Analytics viejo del top nav
+[08:50 ART] | dashboard-general | e9d7578 | fix: limpiar referencia JS a subAnal eliminado
+[08:57 ART] | dashboard-general | 206b864 | revert: volver estado ayer 12hs (4387756)

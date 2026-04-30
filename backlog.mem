@@ -6,69 +6,71 @@ Cada capa loguea su decisión en result_json para análisis posterior en Métric
 
 ---
 
-## 1. Monitores Shadow (4 capas)
+## ORDEN DE EJECUCIÓN (respetar secuencia)
 
-### 1.1 Macro Regime (EMA20/50 semanal BTC)
-- Detecta régimen: BULL / BEAR / NEUTRAL
-- Shadow: si estuviera activo, ¿hubiera bloqueado? ¿era win o loss?
-- Datos a mostrar en dashboard:
-  - Régimen actual + timestamp
-  - EMA20 y EMA50 con valores
-  - Contador: bloqueado / eran wins / eran losses / señales totales
+### PASO 0 — Prerequisitos antes de agregar features
+- [ ] Quitar la capa fundamental actual (bot/fundamental.py básica) ANTES de agregar la nueva con Groq
+- [ ] Eliminar el tab "Analytics" del bot ANTES de agregar el tab "Métricas"
+- [ ] Verificar que los otros bots (bot-4h, bot-1h-v1) estén ejecutando señales (no están operando actualmente)
+- [ ] Implementar seguridad (WEBHOOK_SECRET, Basic Auth) en bot-4h y bot-1h-v1
 
-### 1.2 CVD / Taker Buy Ratio (15m)
-- LONG bloqueado si TBR < 0.50 · SHORT bloqueado si TBR > 0.50
-- Shadow: igual que arriba
-- Datos a mostrar: bloqueado / eran wins / eran losses / señales totales
+### PASO 1 — Fix: Resultado de filtro nunca queda Pendiente
+- PROBLEMA: Señales con verdict "pendiente" que nunca se resuelven
+- SOLUCIÓN: El resultado del filtro debe resolverse siempre (win/loss)
+  - Cuando un trade cierra, actualizar result_json de signal_log con resultado final
+  - Ninguna señal puede quedar indefinidamente en estado pendiente
+  - Revisar la lógica de reconciliación en bot/state.py
 
-### 1.3 XGBoost AI Classifier
-- Entrena con historial de trades (mínimo 40 muestras)
-- Predice probabilidad de win por señal
-- Datos a mostrar: accuracy, F1 score, muestras, trades nuevos
-- Estado inicial: "ENTRENANDO - acumulando datos (X/40 mínimo)"
-
-### 1.4 Fundamental + Groq AI
-- Fuentes: Fear & Greed Index, CryptoPanic, GDELT, Calendario FOMC/CPI, NewsAPI (opcional)
-- IA: Groq LLaMA 3.3-70B (free tier, cache 5 min)
-- Dos sub-bloques en dashboard:
-  a) GROQ: acción (ok/no_long/no_short/block) + confianza + stats
-  b) Reglas shadow: ventanas FOMC/CPI, impact >= 8, sentimiento
-- Variables de entorno: GROQ_API_KEY, FUNDAMENTAL_ENABLED=true, CRYPTOPANIC_API_KEY (opcional)
-
----
-
-## 2. Botón "📊 Métricas" en header del dashboard
+### PASO 2 — Botón "📊 Métricas" en header del dashboard
 - href="/analytics" (página separada con charts)
 - Posición: arriba a la derecha, al lado del balance
-- Ya tiene ruta /analytics implementada con:
+- ANTES de agregar: eliminar el tab Analytics viejo del dashboard
+- Ruta /analytics ya implementada en commits anteriores con:
   - Equity curve (Chart.js)
   - Performance por hora del día
   - Performance por día de semana
   - Tabla por estrategia × lado
   - Top/bottom símbolos
   - Métricas globales (WR%, profit factor, avg win/loss, expectancy)
+- Commits de referencia: 04df7b4, b7a5cfa
 
----
+### PASO 3 — Monitores Shadow (4 capas) — implementar de a uno
 
-## 3. Skill /fundamental-groq
-- Archivo: ~/.claude/skills/fundamental-groq.md
-- Documenta la implementación reutilizable de Fundamental + Groq para otros bots
-- Ver skill para detalles de integración
+#### 3.1 Macro Regime (EMA20/50 semanal BTC)
+- Detecta régimen: BULL / BEAR / NEUTRAL
+- Shadow: si estuviera activo, ¿hubiera bloqueado? ¿era win o loss?
+- Datos a mostrar en dashboard:
+  - Régimen actual + timestamp, EMA20 y EMA50 con valores
+  - Contador: bloqueado / eran wins / eran losses / señales totales
+- Commit de referencia: 90a5f70
 
----
+#### 3.2 CVD / Taker Buy Ratio (15m)
+- LONG bloqueado si TBR < 0.50 · SHORT bloqueado si TBR > 0.50
+- Datos a mostrar: bloqueado / eran wins / eran losses / señales totales
+- Commit de referencia: 90a5f70
 
-## 4. Fix AI Classifier query
-- En bot/ai_classifier.py, la query usa `sl.impact_score` que no existe en signal_log
-- Corrección: usar `sl.fund_impact AS impact_score`
-- Aplicar antes de implementar el AI Classifier
+#### 3.3 XGBoost AI Classifier
+- Entrena con historial de trades (mínimo 40 muestras)
+- Predice probabilidad de win por señal
+- Fix previo requerido: en ai_classifier.py cambiar `sl.impact_score` → `sl.fund_impact AS impact_score`
+- Datos a mostrar: accuracy, F1 score, muestras, trades nuevos
+- Commit de referencia: ae27ec0
+
+#### 3.4 Fundamental + Groq AI
+- ANTES de agregar: quitar fundamental.py básica actual
+- Fuentes: Fear & Greed Index, CryptoPanic, GDELT, Calendario FOMC/CPI, NewsAPI (opcional)
+- IA: Groq LLaMA 3.3-70B (free tier, cache 5 min, fire-and-forget — NUNCA bloquea)
+- Dos sub-bloques en dashboard:
+  a) GROQ: acción (ok/no_long/no_short/block) + confianza + stats
+  b) Reglas shadow: ventanas FOMC/CPI, impact >= 8, sentimiento
+- Variables de entorno: GROQ_API_KEY, FUNDAMENTAL_ENABLED=true, CRYPTOPANIC_API_KEY (opcional)
+- Skill disponible: ~/.claude/skills/fundamental-groq.md
+- Commits de referencia: 630134e (fundamental overhaul), b442075 (Groq layer)
 
 ---
 
 ## Notas de implementación
-- Todos los monitores shadow se implementan en archivos separados:
-  bot/macro_regime.py, bot/cvd_monitor.py, bot/ai_classifier.py
-- El fundamental.py ya existe pero en versión básica — reemplazar con versión Groq
+- Shadow mode: allow = True siempre, solo loguear decisiones en result_json
+- Archivos a agregar: bot/macro_regime.py, bot/cvd_monitor.py, bot/ai_classifier.py
 - En main.py: importar monitors, llamar en _process_signal, agregar campos a result_data
-- Shadow mode: allow = True siempre, solo loguear decisiones
-- Ver commits anteriores del repo para implementación de referencia:
-  ae27ec0 (AI Classifier), 90a5f70 (Macro+CVD), 04df7b4 (fundamental), b442075 (Groq)
+- Ver pusheo.mem para historial de commits de referencia
