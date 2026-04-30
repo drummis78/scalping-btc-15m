@@ -920,6 +920,22 @@ async def dashboard():
             )
         return "".join(rows)
 
+    def _groq_card(action, reason, conf):
+        if action in ("", "—", "disabled", "groq_ok"):
+            return ""
+        color = "#ff5252" if action == "groq_block" else ("#ffab40" if "no_" in action else "#00e676")
+        reason_html = (
+            '<div style="font-size:9px;color:#666;margin-top:3px">' + reason[:80] + "</div>"
+            if reason else ""
+        )
+        return (
+            '<div style="background:#0d1117;border-radius:6px;padding:8px;margin-bottom:10px">'
+            '<div style="display:flex;justify-content:space-between;align-items:center">'
+            '<span style="font-size:11px;font-weight:bold;color:' + color + '">' + action.upper() + "</span>"
+            '<span style="font-size:10px;color:#555">conf=' + f"{conf:.0%}" + "</span>"
+            "</div>" + reason_html + "</div>"
+        )
+
     def _build_cooldown_panel():
         streak, last_close = 0, None
         # Calcular streak y cooldown restante en base a datos ya disponibles
@@ -1261,7 +1277,7 @@ async def dashboard():
           <span style="font-size:10px;padding:2px 6px;border-radius:4px;background:{'#00e67622' if gla not in ('—','disabled','') else '#55555522'};color:{'#00e676' if gla not in ('—','disabled','') else '#555'}">{'GROQ' if gla not in ('—','disabled','') else 'REGLAS'}</span>
         </div>
         <div style="font-size:10px;color:#555;margin-bottom:8px">FOMC/CPI window · Sentiment · LLaMA 3.3-70B</div>
-        {"" if gla in ('—','disabled','') else f'<div style="background:#0d1117;border-radius:6px;padding:8px;margin-bottom:10px"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:11px;font-weight:bold;color:' + ("#ff5252" if gla=="block" else "#ffab40" if "no_" in gla else "#00e676") + '">' + gla.upper() + '</span><span style="font-size:10px;color:#555">conf={glc:.0%}</span></div>' + (f\'<div style="font-size:9px;color:#666;margin-top:3px">{glr[:80]}</div>\' if glr else "") + "</div>"}
+        {_groq_card(gla, glr, glc)}
         <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Groq hubiera bloqueado...</div>
         <div style="display:flex;gap:16px;margin-bottom:10px">
           <div><div style="font-size:16px;font-weight:bold;color:#ff5252">{gs.get('would_block',0)}</div><div style="font-size:10px;color:#555">bloqueado</div></div>
