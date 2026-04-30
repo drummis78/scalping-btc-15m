@@ -26,3 +26,8 @@
 [08:41 ART] | dashboard-general | 22af174 | fix: eliminar tab Analytics viejo del top nav
 [08:50 ART] | dashboard-general | e9d7578 | fix: limpiar referencia JS a subAnal eliminado
 [08:57 ART] | dashboard-general | 206b864 | revert: volver estado ayer 12hs (4387756)
+
+## 2026-04-30 (sesión noche)
+
+[~09:30 ART] | dashboard-general | 0ffd1f4 | feat: agregar build number al header para verificar deploy vs cache
+[~09:30 ART] | scalping-btc-15m | 675b36a | chore: agregar pusheo.mem + actualizar backlog.mem con orden de ejecucion
