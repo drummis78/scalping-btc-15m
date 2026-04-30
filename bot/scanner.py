@@ -40,9 +40,11 @@ FUNDING_LONG_BLOCK  =  0.001   # >+0.1%: longs pagan caro → no LONG
 FUNDING_SHORT_BLOCK = -0.0005  # <-0.05%: shorts pagan caro → no SHORT
 
 # ── TCP — Trend-Continuity Pullback (estrategia paralela) ────────────────────
-TCP_SL_MULT  = 1.2   # SL = 1.2x ATR
-TCP_TP_MULT  = 2.5   # TP = 2.5x ATR  → ratio ~2:1
-TCP_ZONE_PCT = 0.003 # 0.3% tolerancia para "toca EMA20"
+TCP_SL_MULT        = 1.2      # SL = 1.2x ATR
+TCP_TP_MULT        = 3.0      # TP = 3.0x ATR → ratio 2.5:1 (era 2.5)
+TCP_ZONE_PCT       = 0.003    # 0.3% tolerancia para "toca EMA20"
+TCP_ADX_MIN        = 30       # TCP necesita más momentum que Donchian (25)
+TCP_MIN_DAILY_VOL  = 20_000_000   # $20M USD/día estimado mínimo de liquidez
 
 
 def _build_exchange() -> ccxt_async.binance:
@@ -373,7 +375,14 @@ async def scan_symbol_tcp(exchange: ccxt_async.binance, config: dict) -> Optiona
 
         # Filtro micro-cap: tokens con precio muy bajo tienen ATR% desproporcionado
         if last_close < 0.005:
-            logger.debug(f"[TCP] {symbol} precio muy bajo ({last_close:.6f}) — omitido por micro-cap filter")
+            logger.debug(f"[TCP] {symbol} precio muy bajo ({last_close:.6f}) — micro-cap filter")
+            return None
+
+        # Filtro de liquidez: volumen diario estimado < $20M USD → skip
+        vol_avg_20 = float(df["volume"].iloc[-22:-2].mean()) if len(df) >= 22 else last_vol
+        daily_vol_usd = vol_avg_20 * 96 * last_close
+        if daily_vol_usd < TCP_MIN_DAILY_VOL:
+            logger.debug(f"[TCP] {symbol} liquidez insuficiente (${daily_vol_usd/1e6:.1f}M/día est.)")
             return None
 
         # ── TCP LONG ──────────────────────────────────────────────────────────
@@ -382,13 +391,13 @@ async def scan_symbol_tcp(exchange: ccxt_async.binance, config: dict) -> Optiona
             rsi_ok  = 40 <= rsi <= 55
             green   = last_close > last_open
             if touched and rsi_ok and green and vol_ok:
-                if adx_val < settings.ADX_THRESHOLD:
+                if adx_val < TCP_ADX_MIN:
                     return {"symbol": symbol, "side": "long", "price": last_close,
                             "sl_price": round(last_close - atr * TCP_SL_MULT, 6),
                             "tp_price": round(last_close + atr * TCP_TP_MULT, 6),
                             "candle_ts": candle_ts, "blocked_reason": f"adx_low|{adx_val:.1f}",
                             "strategy": "tcp"}
-            if touched and rsi_ok and green and vol_ok and adx_val >= settings.ADX_THRESHOLD:
+            if touched and rsi_ok and green and vol_ok and adx_val >= TCP_ADX_MIN:
                 sl_price = round(last_close - atr * TCP_SL_MULT, 6)
                 tp_price = round(last_close + atr * TCP_TP_MULT, 6)
                 regime, chop_val = await _get_regime_1h(exchange, symbol)
@@ -423,13 +432,13 @@ async def scan_symbol_tcp(exchange: ccxt_async.binance, config: dict) -> Optiona
             rsi_ok  = 45 <= rsi <= 60
             red     = last_close < last_open
             if touched and rsi_ok and red and vol_ok:
-                if adx_val < settings.ADX_THRESHOLD:
+                if adx_val < TCP_ADX_MIN:
                     return {"symbol": symbol, "side": "short", "price": last_close,
                             "sl_price": round(last_close + atr * TCP_SL_MULT, 6),
                             "tp_price": round(last_close - atr * TCP_TP_MULT, 6),
                             "candle_ts": candle_ts, "blocked_reason": f"adx_low|{adx_val:.1f}",
                             "strategy": "tcp"}
-            if touched and rsi_ok and red and vol_ok and adx_val >= settings.ADX_THRESHOLD:
+            if touched and rsi_ok and red and vol_ok and adx_val >= TCP_ADX_MIN:
                 sl_price = round(last_close + atr * TCP_SL_MULT, 6)
                 tp_price = round(last_close - atr * TCP_TP_MULT, 6)
                 regime, chop_val = await _get_regime_1h(exchange, symbol)

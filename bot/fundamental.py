@@ -371,12 +371,57 @@ class FundamentalFilter:
         except Exception as e:
             logger.error(f"[FUNDAMENTAL] Error insertando eventos ({source_label}): {e}")
 
+    # ── Shadow decision matrix (nunca bloquea, solo observa) ─────────────────
+
+    def _compute_shadow_decision(self, max_impact: float, avg_sent: float,
+                                  event_count: int) -> tuple:
+        """
+        Retorna (would_block_all, direction_filter, label).
+        direction_filter: "no_long" | "no_short" | None
+        NUNCA bloquea — puro shadow mode.
+        """
+        now = datetime.now(timezone.utc)
+
+        # Ventana FOMC (4h antes hasta 2h después del anuncio de la Fed, ~18:00 UTC)
+        for date_str in FOMC_DATES:
+            fomc_dt = datetime.fromisoformat(date_str + "T18:00:00+00:00")
+            delta_h = (fomc_dt - now).total_seconds() / 3600
+            if -2.0 <= delta_h <= 4.0:
+                return True, None, f"fomc_window|{date_str}"
+
+        # Ventana CPI (1h antes hasta 2h después del release, ~13:30 UTC)
+        for date_str in CPI_DATES:
+            cpi_dt = datetime.fromisoformat(date_str + "T13:30:00+00:00")
+            delta_h = (cpi_dt - now).total_seconds() / 3600
+            if -1.0 <= delta_h <= 2.0:
+                return True, None, f"cpi_window|{date_str}"
+
+        # Evento crítico de muy alto impacto
+        if event_count > 0 and max_impact >= 8.0:
+            return True, None, f"critical_event|impact={max_impact:.1f}"
+
+        # Filtro direccional por sentimiento
+        if event_count > 0 and max_impact >= 4.0:
+            if avg_sent < -0.4:
+                return False, "no_long", f"bearish_news|sent={avg_sent:.2f}"
+            if avg_sent > 0.4:
+                return False, "no_short", f"bullish_news|sent={avg_sent:.2f}"
+
+        return False, None, "ok"
+
     # ── Check (llamado por _process_signal) ───────────────────────────────────
 
     async def check(self, symbol: str = "BTC") -> dict:
+        _shadow_defaults = {
+            "shadow_would_block": False,
+            "shadow_direction":   None,
+            "shadow_label":       "disabled",
+        }
+
         if not settings.FUNDAMENTAL_ENABLED:
             return {"allow": True, "reduce_size": False, "boost_size": False,
-                    "reason": "fundamental_disabled", "impact_score": 0.0}
+                    "reason": "fundamental_disabled", "impact_score": 0.0,
+                    **_shadow_defaults}
 
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=IMPACT_WINDOW_HOURS)).isoformat()
         async with get_pool().acquire() as conn:
@@ -393,29 +438,33 @@ class FundamentalFilter:
         fg_label    = self._last_fear_greed["label"] if self._last_fear_greed else "N/A"
         reason_base = f"F&G={fg_value:.0f}({fg_label}) | impact={max_impact:.1f} | events={event_count}"
 
+        # Shadow decision (nunca bloquea — solo para observación en dashboard)
+        s_block, s_dir, s_label = self._compute_shadow_decision(max_impact, avg_sent, event_count)
+        shadow = {"shadow_would_block": s_block, "shadow_direction": s_dir, "shadow_label": s_label}
+
         if fg_value >= FEAR_GREED_EXTREME_GREED:
             return {"allow": True, "reduce_size": True, "boost_size": False,
                     "reason": reason_base + " → REDUCE_SIZE (extreme greed)",
-                    "impact_score": max_impact}
+                    "impact_score": max_impact, **shadow}
 
         if max_impact >= IMPACT_BLOCK_THRESHOLD:
-            return {"allow": False, "reduce_size": False, "boost_size": False,
-                    "reason": reason_base + " → BLOCKED (high impact news)",
-                    "impact_score": max_impact}
+            return {"allow": True, "reduce_size": True, "boost_size": False,
+                    "reason": reason_base + " → HIGH_IMPACT (shadow only)",
+                    "impact_score": max_impact, **shadow}
 
         if max_impact >= IMPACT_REDUCE_THRESHOLD:
             return {"allow": True, "reduce_size": True, "boost_size": False,
                     "reason": reason_base + " → REDUCE_SIZE (medium impact)",
-                    "impact_score": max_impact}
+                    "impact_score": max_impact, **shadow}
 
         if fg_value <= FEAR_GREED_EXTREME_FEAR:
             return {"allow": True, "reduce_size": False, "boost_size": True,
                     "reason": reason_base + " → BOOST_SIZE (extreme fear)",
-                    "impact_score": max_impact}
+                    "impact_score": max_impact, **shadow}
 
         return {"allow": True, "reduce_size": False, "boost_size": False,
                 "reason": reason_base + " → OK",
-                "impact_score": max_impact}
+                "impact_score": max_impact, **shadow}
 
 
 fundamental_filter = FundamentalFilter()

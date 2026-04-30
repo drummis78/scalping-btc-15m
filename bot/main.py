@@ -186,27 +186,20 @@ async def _process_signal(sig: dict):
                          chop_val=chop_val)
         return
 
-    # Fundamental filter
-    _fund_allow  = True
-    _fund_reason = ""
-    _fund_impact = 0.0
+    # Fundamental filter — shadow mode (nunca bloquea, solo observa)
     fund = await fundamental_filter.check(symbol)
-    _fund_allow  = fund["allow"]
-    _fund_reason = fund["reason"]
-    _fund_impact = fund.get("impact_score", 0.0)
-    logger.info(f"[FUNDAMENTAL] {symbol}: {fund['reason']}")
-
-    if not fund["allow"]:
-        await notifier.notify(
-            f"🧠 *FILTRO IA — BLOQUEADA*\n"
-            f"`{side.upper()}` `{symbol}` @ `${price:,.4f}`\n"
-            f"Score: `{_fund_impact:.1f}` | `{_fund_reason}`"
-        )
-        await log_signal(ts, symbol, side, price, sl_price, tp_price,
-                         False, _fund_reason, _fund_impact, "filtered_fundamental",
-                         json.dumps({"outcome": "pending", "blocked_reason": "filtered_fundamental"}), strategy,
-                         chop_val=chop_val)
-        return
+    _fund_reason       = fund["reason"]
+    _fund_impact       = fund.get("impact_score", 0.0)
+    _fund_shadow_block = fund.get("shadow_would_block", False)
+    _fund_shadow_dir   = fund.get("shadow_direction")   # "no_long" | "no_short" | None
+    _fund_shadow_label = fund.get("shadow_label", "ok")
+    # Si la dirección es "no_long" y el trade es LONG, o "no_short" y es SHORT → habría bloqueado
+    _fund_shadow_trade = (
+        _fund_shadow_block or
+        (_fund_shadow_dir == "no_long"  and side == "long") or
+        (_fund_shadow_dir == "no_short" and side == "short")
+    )
+    logger.info(f"[FUNDAMENTAL] {symbol}: {_fund_reason} | shadow={'block' if _fund_shadow_trade else (_fund_shadow_dir or 'ok')}")
 
     # Régimen macro — solo observación, nunca bloquea
     mr = macro_regime.get_regime()
@@ -242,14 +235,17 @@ async def _process_signal(sig: dict):
     )
 
     result_data = dict(result)
-    result_data["macro_regime"]       = mr_regime
-    result_data["macro_would_block"]  = mr_would_block
-    result_data["cvd_tbr"]            = tbr
-    result_data["cvd_would_block"]    = cvd_would_block
-    result_data["ai_score"]           = ai_score
-    result_data["feat_atr_pct"]       = round(_feat_atr_pct, 4)
-    result_data["feat_vol_ratio"]     = 1.0
-    result_data["feat_body_pct"]      = 0.35
+    result_data["macro_regime"]          = mr_regime
+    result_data["macro_would_block"]     = mr_would_block
+    result_data["cvd_tbr"]               = tbr
+    result_data["cvd_would_block"]       = cvd_would_block
+    result_data["ai_score"]              = ai_score
+    result_data["feat_atr_pct"]          = round(_feat_atr_pct, 4)
+    result_data["feat_vol_ratio"]        = 1.0
+    result_data["feat_body_pct"]         = 0.35
+    result_data["fund_shadow_would_block"] = _fund_shadow_trade
+    result_data["fund_shadow_direction"]   = _fund_shadow_dir
+    result_data["fund_shadow_label"]       = _fund_shadow_label
 
     await log_signal(ts, symbol, side, price, sl_price, tp_price,
                      _fund_allow, _fund_reason, _fund_impact,
@@ -680,6 +676,17 @@ async def dashboard():
                          AND result_json LIKE '%sl_hit%' THEN 1 ELSE 0 END) wblock_losses
             FROM signal_log WHERE verdict='executed'
         """))
+        # Fundamental shadow stats
+        fund_shadow = dict(await conn.fetchrow("""
+            SELECT
+                COUNT(*) total,
+                SUM(CASE WHEN result_json LIKE '%"fund_shadow_would_block": true%' THEN 1 ELSE 0 END) would_block,
+                SUM(CASE WHEN result_json LIKE '%"fund_shadow_would_block": true%'
+                         AND result_json LIKE '%tp_hit%' THEN 1 ELSE 0 END) wblock_wins,
+                SUM(CASE WHEN result_json LIKE '%"fund_shadow_would_block": true%'
+                         AND result_json LIKE '%sl_hit%' THEN 1 ELSE 0 END) wblock_losses
+            FROM signal_log WHERE verdict='executed'
+        """))
         # CVD shadow stats
         cvd_shadow = dict(await conn.fetchrow("""
             SELECT
@@ -1074,7 +1081,7 @@ async def dashboard():
         </div>"""
 
     html_out = f"""<!DOCTYPE html><html><head>
-    <title>Scalping Bot</title>
+    <title>Scalping Bot 15m</title>
     <meta charset="utf-8">
     <style>
         *{{box-sizing:border-box}} body{{font-family:'Segoe UI',sans-serif;background:#0a0a0a;color:#e0e0e0;margin:0;padding:20px}}
@@ -1108,10 +1115,13 @@ async def dashboard():
                 <span style="color:#ff9800">TCP 15m</span> ({len(_symbols)} sym)
             </div>
         </div>
-        <div style="text-align:right">
-            <div class="lbl">Balance</div>
-            <div class="val">${bal:,.2f}</div>
-            <button onclick="resetBalance()" style="margin-top:4px;padding:3px 8px;border-radius:6px;border:1px solid #00bcd444;background:#00bcd40d;color:#00bcd4;cursor:pointer;font-size:10px">↺ ${settings.PAPER_BALANCE:.0f}</button>
+        <div style="display:flex;align-items:center;gap:16px">
+            <a href="/analytics" style="padding:7px 14px;border-radius:8px;border:1px solid #00bcd444;background:#00bcd40d;color:#00bcd4;font-size:11px;font-weight:bold;text-decoration:none">📊 Analytics</a>
+            <div style="text-align:right">
+                <div class="lbl">Balance</div>
+                <div class="val">${bal:,.2f}</div>
+                <button onclick="resetBalance()" style="margin-top:4px;padding:3px 8px;border-radius:6px;border:1px solid #00bcd444;background:#00bcd40d;color:#00bcd4;cursor:pointer;font-size:10px">↺ ${settings.PAPER_BALANCE:.0f}</button>
+            </div>
         </div>
     </div>
 
@@ -1197,6 +1207,22 @@ async def dashboard():
         <div style="display:flex;flex-direction:column;gap:3px">
           {"".join(f'<div style="display:flex;gap:6px;align-items:center"><span style="font-size:10px;color:#666;width:80px;flex-shrink:0">{k}</span><div style="height:4px;border-radius:2px;background:#00bcd4;width:{min(v*300,100):.0f}px"></div><span style="font-size:9px;color:#444">{v:.3f}</span></div>' for k,v in sorted(am["feature_importances"].items(), key=lambda x: -x[1])[:6])}
         </div>''' if am['feature_importances'] else ''}
+      </div>""")()}
+
+      <!-- Fundamental Shadow Monitor -->
+      {(lambda fs=fund_shadow: f"""
+      <div style="background:#161616;border:1px solid #222;border-radius:10px;padding:16px;flex:1;min-width:260px">
+        <div style="margin-bottom:12px">
+          <span style="font-weight:bold;font-size:13px;color:#aaa">Filtro Fundamental Avanzado</span>
+          <div style="font-size:10px;color:#555;margin-top:4px">FOMC/CPI window · Sentiment direction · Impact crítico</div>
+        </div>
+        <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Si estuviera activo hubiera...</div>
+        <div style="display:flex;gap:16px">
+          <div><div style="font-size:16px;font-weight:bold;color:#ff5252">{fs.get('would_block',0)}</div><div style="font-size:10px;color:#555">bloqueado</div></div>
+          <div><div style="font-size:16px;font-weight:bold;color:#00e676">{fs.get('wblock_wins',0)}</div><div style="font-size:10px;color:#555">eran wins</div></div>
+          <div><div style="font-size:16px;font-weight:bold;color:#aaa">{fs.get('wblock_losses',0)}</div><div style="font-size:10px;color:#555">eran losses</div></div>
+          <div><div style="font-size:16px;font-weight:bold;color:#ffd740">{fs.get('total',0)}</div><div style="font-size:10px;color:#555">señales totales</div></div>
+        </div>
       </div>""")()}
 
     </div>
@@ -1676,6 +1702,436 @@ async def api_analytics(_: None = Depends(_check_secret)):
         "funding_summary":    dict(funding_sum) if funding_sum else {},
         "streak_stats":       streak_stats,
     }
+
+
+@app.get("/analytics", response_class=__import__("fastapi.responses", fromlist=["HTMLResponse"]).HTMLResponse)
+async def analytics_page(request: Request, _: None = Depends(_check_basic_auth)):
+    from datetime import date as _date
+    import json as _json
+
+    async with get_pool().acquire() as conn:
+        # Daily equity data (curva acumulada)
+        daily_eq = await conn.fetch("""
+            SELECT DATE(close_time::timestamptz AT TIME ZONE 'America/Argentina/Buenos_Aires') AS day,
+                   ROUND(SUM(pnl)::numeric,2) AS daily_pnl,
+                   COUNT(*) AS trades
+            FROM trades WHERE close_time IS NOT NULL
+            GROUP BY 1 ORDER BY 1
+        """)
+        # Monthly performance
+        monthly = await conn.fetch("""
+            SELECT DATE_TRUNC('month', close_time::timestamptz AT TIME ZONE 'America/Argentina/Buenos_Aires') AS month,
+                   COUNT(*) AS trades,
+                   SUM(CASE WHEN close_reason='tp_hit' THEN 1 ELSE 0 END) AS wins,
+                   SUM(CASE WHEN close_reason='sl_hit' AND pnl>=0 THEN 1 ELSE 0 END) AS be_hits,
+                   SUM(CASE WHEN close_reason='sl_hit' AND pnl<0  THEN 1 ELSE 0 END) AS losses,
+                   ROUND(SUM(pnl)::numeric,2) AS total_pnl,
+                   ROUND(AVG(pnl)::numeric,2) AS avg_pnl
+            FROM trades WHERE close_time IS NOT NULL
+            GROUP BY 1 ORDER BY 1
+        """)
+        # Hourly analysis (UTC)
+        hourly = await conn.fetch("""
+            SELECT EXTRACT(HOUR FROM close_time::timestamptz) AS hour,
+                   COUNT(*) AS trades,
+                   SUM(CASE WHEN close_reason='tp_hit' THEN 1 ELSE 0 END) AS wins,
+                   SUM(CASE WHEN close_reason='sl_hit' AND pnl<0 THEN 1 ELSE 0 END) AS losses,
+                   ROUND(SUM(pnl)::numeric,2) AS total_pnl,
+                   ROUND(AVG(pnl)::numeric,2) AS avg_pnl
+            FROM trades WHERE close_time IS NOT NULL
+            GROUP BY 1 ORDER BY 1
+        """)
+        # Day of week
+        dow = await conn.fetch("""
+            SELECT EXTRACT(DOW FROM close_time::timestamptz AT TIME ZONE 'America/Argentina/Buenos_Aires') AS dow,
+                   COUNT(*) AS trades,
+                   SUM(CASE WHEN close_reason='tp_hit' THEN 1 ELSE 0 END) AS wins,
+                   SUM(CASE WHEN close_reason='sl_hit' AND pnl<0 THEN 1 ELSE 0 END) AS losses,
+                   ROUND(SUM(pnl)::numeric,2) AS total_pnl,
+                   ROUND(AVG(pnl)::numeric,2) AS avg_pnl
+            FROM trades WHERE close_time IS NOT NULL
+            GROUP BY 1 ORDER BY 1
+        """)
+        # Strategy × side
+        strat_side = await conn.fetch("""
+            SELECT strategy, side,
+                   COUNT(*) AS trades,
+                   SUM(CASE WHEN close_reason='tp_hit' THEN 1 ELSE 0 END) AS wins,
+                   SUM(CASE WHEN close_reason='sl_hit' AND pnl>=0 THEN 1 ELSE 0 END) AS be_hits,
+                   SUM(CASE WHEN close_reason='sl_hit' AND pnl<0  THEN 1 ELSE 0 END) AS losses,
+                   ROUND(SUM(pnl)::numeric,2) AS total_pnl,
+                   ROUND(SUM(CASE WHEN close_reason='tp_hit' THEN pnl ELSE 0 END)::numeric,2) AS sum_wins,
+                   ROUND(ABS(SUM(CASE WHEN close_reason='sl_hit' AND pnl<0 THEN pnl ELSE 0 END))::numeric,2) AS sum_losses,
+                   ROUND(AVG(CASE WHEN close_reason='tp_hit' THEN pnl END)::numeric,2) AS avg_win,
+                   ROUND(AVG(CASE WHEN close_reason='sl_hit' AND pnl<0 THEN pnl END)::numeric,2) AS avg_loss
+            FROM trades WHERE close_time IS NOT NULL
+            GROUP BY strategy, side ORDER BY strategy, side
+        """)
+        # Top/bottom symbols
+        sym_perf = await conn.fetch("""
+            SELECT symbol, strategy,
+                   COUNT(*) AS trades,
+                   SUM(CASE WHEN close_reason='tp_hit' THEN 1 ELSE 0 END) AS wins,
+                   SUM(CASE WHEN close_reason='sl_hit' AND pnl<0 THEN 1 ELSE 0 END) AS losses,
+                   ROUND(SUM(pnl)::numeric,2) AS total_pnl,
+                   ROUND(AVG(CASE WHEN close_reason='tp_hit' THEN pnl END)::numeric,2) AS avg_win,
+                   ROUND(AVG(CASE WHEN close_reason='sl_hit' AND pnl<0 THEN pnl END)::numeric,2) AS avg_loss
+            FROM trades WHERE close_time IS NOT NULL
+            GROUP BY symbol, strategy HAVING COUNT(*) >= 2
+            ORDER BY total_pnl DESC
+        """)
+        # All trades for global metrics
+        all_t = await conn.fetch("SELECT pnl, close_reason FROM trades WHERE close_time IS NOT NULL")
+
+    # ── compute global metrics ────────────────────────────────────────────────
+    all_wins   = [r["pnl"] for r in all_t if (r["close_reason"] or "") == "tp_hit"]
+    all_losses = [r["pnl"] for r in all_t if (r["close_reason"] or "") == "sl_hit" and r["pnl"] < 0]
+    all_be     = [r["pnl"] for r in all_t if (r["close_reason"] or "") == "sl_hit" and r["pnl"] >= 0]
+    total_tr   = len(all_t)
+    n_wins     = len(all_wins)
+    n_losses   = len(all_losses)
+    n_be       = len(all_be)
+    wr_pct     = n_wins / (n_wins + n_losses) * 100 if (n_wins + n_losses) else 0
+    sum_wins   = sum(all_wins)
+    sum_losses = abs(sum(all_losses))
+    pf         = sum_wins / sum_losses if sum_losses > 0 else None
+    avg_win_g  = sum_wins / n_wins if n_wins else 0
+    avg_loss_g = sum(all_losses) / n_losses if n_losses else 0  # negative number
+    exp_g      = (wr_pct/100) * avg_win_g + (1 - wr_pct/100) * avg_loss_g if total_tr else 0
+    total_pnl_g = sum(r["pnl"] for r in all_t)
+
+    # Equity curve + max drawdown
+    eq_labels, eq_values, eq_daily = [], [], []
+    cumulative, peak, max_dd = 0.0, 0.0, 0.0
+    for row in daily_eq:
+        d = str(row["day"])
+        v = float(row["daily_pnl"] or 0)
+        cumulative += v
+        if cumulative > peak: peak = cumulative
+        dd = peak - cumulative
+        if dd > max_dd: max_dd = dd
+        eq_labels.append(d)
+        eq_daily.append(round(v, 2))
+        eq_values.append(round(cumulative, 2))
+
+    # Strategy × side metrics
+    strat_metrics = []
+    for r in strat_side:
+        sw  = float(r["sum_wins"] or 0)
+        sl  = float(r["sum_losses"] or 0)
+        w   = int(r["wins"])
+        lo  = int(r["losses"])
+        tr  = int(r["trades"])
+        be  = int(r["be_hits"])
+        wr  = w / (w + lo) * 100 if (w + lo) else 0
+        pf_r = sw / sl if sl > 0 else None
+        aw  = float(r["avg_win"]  or 0)
+        al  = float(r["avg_loss"] or 0)
+        exp = (wr/100)*aw + (1-wr/100)*al if aw and al else None
+        strat_metrics.append({
+            "strategy": r["strategy"], "side": r["side"],
+            "trades": tr, "wins": w, "be": be, "losses": lo,
+            "wr": round(wr, 1),
+            "profit_factor": round(pf_r, 2) if pf_r else None,
+            "expectancy": round(exp, 2) if exp else None,
+            "total_pnl": float(r["total_pnl"] or 0),
+        })
+
+    # Chart data
+    hourly_labels = [str(int(r["hour"])) + "h" for r in hourly]
+    hourly_pnl    = [float(r["avg_pnl"] or 0) for r in hourly]
+    hourly_trades = [int(r["trades"]) for r in hourly]
+    dow_names     = ["Dom","Lun","Mar","Mié","Jue","Vie","Sáb"]
+    dow_data      = {int(r["dow"]): r for r in dow}
+
+    sym_list = [dict(r) for r in sym_perf]
+    top10    = sym_list[:10]
+    bottom10 = [r for r in sym_list if float(r["total_pnl"]) < 0][-10:][::-1]
+
+    mode = "PAPER" if settings.TESTNET else "REAL"
+
+    def _pf_cell(pf):
+        if pf is None: return "<td style='color:#555'>—</td>"
+        c = "#00e676" if pf >= 1.5 else ("#ffd740" if pf >= 1.0 else "#ff5252")
+        return f"<td style='color:{c};font-weight:bold'>{pf}</td>"
+
+    def _exp_cell(exp):
+        if exp is None: return "<td style='color:#555'>—</td>"
+        c = "#00e676" if exp > 0 else "#ff5252"
+        return f"<td style='color:{c}'>${exp:+.2f}</td>"
+
+    def _strat_badge(s):
+        c = "#00bcd4" if s == "donchian" else "#ff9800"
+        l = "Donchian 15m" if s == "donchian" else "TCP 15m"
+        return f'<span style="background:{c}22;color:{c};padding:1px 6px;border-radius:4px;font-size:10px">{l}</span>'
+
+    def _side_badge(s):
+        c = "#00e676" if s == "long" else "#ff5252"
+        return f'<span style="color:{c};font-weight:bold">{s.upper()}</span>'
+
+    def rows_strat_side():
+        if not strat_metrics:
+            return "<tr><td colspan=9 style='color:#555;text-align:center;padding:20px'>Sin datos</td></tr>"
+        rows = []
+        for m in strat_metrics:
+            pnl_c = "#00e676" if m["total_pnl"] >= 0 else "#ff5252"
+            wr_c  = "#00e676" if m["wr"] >= 40 else ("#ffd740" if m["wr"] >= 30 else "#ff5252")
+            rows.append(f"<tr>"
+                f"<td>{_strat_badge(m['strategy'])}</td>"
+                f"<td>{_side_badge(m['side'])}</td>"
+                f"<td>{m['trades']}</td>"
+                f"<td style='color:{wr_c};font-weight:bold'>{m['wr']:.1f}%</td>"
+                f"<td><span style='color:#00e676'>{m['wins']}</span> / "
+                f"<span style='color:#ffd740'>{m['be']}</span> / "
+                f"<span style='color:#ff5252'>{m['losses']}</span></td>"
+                f"{_pf_cell(m['profit_factor'])}"
+                f"{_exp_cell(m['expectancy'])}"
+                f"<td style='color:{pnl_c};font-weight:bold'>${m['total_pnl']:+.2f}</td>"
+                "</tr>")
+        return "".join(rows)
+
+    def rows_monthly():
+        if not monthly:
+            return "<tr><td colspan=8 style='color:#555;text-align:center;padding:20px'>Sin datos</td></tr>"
+        rows = []
+        for r in monthly:
+            w  = int(r["wins"]); be = int(r["be_hits"]); lo = int(r["losses"]); tr = int(r["trades"])
+            wr = w / (w+lo)*100 if (w+lo) else 0
+            pnl = float(r["total_pnl"] or 0)
+            pnl_c = "#00e676" if pnl >= 0 else "#ff5252"
+            wr_c  = "#00e676" if wr >= 40 else ("#ffd740" if wr >= 30 else "#ff5252")
+            month_str = str(r["month"])[:7]
+            rows.append(f"<tr>"
+                f"<td style='font-weight:bold;color:#aaa'>{month_str}</td>"
+                f"<td>{tr}</td>"
+                f"<td style='color:{wr_c};font-weight:bold'>{wr:.1f}%</td>"
+                f"<td><span style='color:#00e676'>{w}</span> / "
+                f"<span style='color:#ffd740'>{be}</span> / "
+                f"<span style='color:#ff5252'>{lo}</span></td>"
+                f"<td style='color:{pnl_c};font-weight:bold'>${pnl:+.2f}</td>"
+                f"<td style='color:#aaa'>${float(r['avg_pnl'] or 0):+.2f}</td>"
+                "</tr>")
+        return "".join(rows)
+
+    def rows_dow():
+        if not dow:
+            return "<tr><td colspan=6 style='color:#555;text-align:center;padding:20px'>Sin datos</td></tr>"
+        rows = []
+        for i in range(7):
+            r = dow_data.get(i)
+            name = dow_names[i]
+            if not r:
+                rows.append(f"<tr><td style='color:#555'>{name}</td><td colspan=5 style='color:#333'>—</td></tr>")
+                continue
+            w = int(r["wins"]); lo = int(r["losses"]); tr = int(r["trades"])
+            wr = w/(w+lo)*100 if (w+lo) else 0
+            pnl = float(r["total_pnl"] or 0)
+            pnl_c = "#00e676" if pnl >= 0 else "#ff5252"
+            wr_c  = "#00e676" if wr >= 40 else ("#ffd740" if wr >= 30 else "#ff5252")
+            rows.append(f"<tr>"
+                f"<td style='font-weight:bold;color:#aaa'>{name}</td>"
+                f"<td>{tr}</td>"
+                f"<td style='color:{wr_c}'>{wr:.1f}%</td>"
+                f"<td style='color:#00e676'>{w}</td><td style='color:#ff5252'>{lo}</td>"
+                f"<td style='color:{pnl_c};font-weight:bold'>${pnl:+.2f}</td>"
+                "</tr>")
+        return "".join(rows)
+
+    def rows_symbols(sym_rows, label_color="#00e676"):
+        if not sym_rows:
+            return f"<tr><td colspan=8 style='color:#555;text-align:center;padding:20px'>Sin datos</td></tr>"
+        rows = []
+        for r in sym_rows:
+            w = int(r["wins"]); lo = int(r["losses"]); tr = int(r["trades"])
+            wr = w/(w+lo)*100 if (w+lo) else 0
+            pnl = float(r["total_pnl"] or 0)
+            aw  = float(r["avg_win"]  or 0)
+            al  = float(r["avg_loss"] or 0)
+            pf_s = round(abs(aw*w / (abs(al)*lo)), 2) if al and lo > 0 else None
+            pnl_c = "#00e676" if pnl >= 0 else "#ff5252"
+            wr_c  = "#00e676" if wr >= 40 else ("#ffd740" if wr >= 30 else "#ff5252")
+            rows.append(f"<tr>"
+                f"<td><b style='color:{label_color}'>{r['symbol']}</b></td>"
+                f"<td>{_strat_badge(r['strategy'])}</td>"
+                f"<td>{tr}</td>"
+                f"<td style='color:{wr_c}'>{wr:.1f}%</td>"
+                f"{_pf_cell(pf_s)}"
+                f"<td style='color:#00e676'>${aw:+.2f}</td>"
+                f"<td style='color:#ff5252'>${al:+.2f}</td>"
+                f"<td style='color:{pnl_c};font-weight:bold'>${pnl:+.2f}</td>"
+                "</tr>")
+        return "".join(rows)
+
+    eq_labels_js    = _json.dumps(eq_labels)
+    eq_values_js    = _json.dumps(eq_values)
+    eq_daily_js     = _json.dumps(eq_daily)
+    hourly_lbl_js   = _json.dumps(hourly_labels)
+    hourly_pnl_js   = _json.dumps(hourly_pnl)
+    hourly_tr_js    = _json.dumps(hourly_trades)
+    pf_str          = f"{pf:.2f}" if pf else "—"
+    exp_str         = f"${exp_g:+.2f}" if total_tr else "—"
+    pf_color        = "#00e676" if pf and pf >= 1.5 else ("#ffd740" if pf and pf >= 1.0 else "#ff5252") if pf else "#555"
+    exp_color       = "#00e676" if exp_g > 0 else "#ff5252"
+
+    return f"""<!DOCTYPE html><html><head>
+    <title>Analytics — Scalping Bot 15m</title>
+    <meta charset="utf-8">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        *{{box-sizing:border-box}} body{{font-family:'Segoe UI',sans-serif;background:#0a0a0a;color:#e0e0e0;margin:0;padding:20px}}
+        .wrap{{max-width:1400px;margin:auto}}
+        .hdr{{display:flex;justify-content:space-between;align-items:center;background:#141414;padding:16px 24px;border-radius:14px;border:1px solid #222;margin-bottom:20px}}
+        .stats{{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px}}
+        .card{{background:#161616;border:1px solid #222;border-radius:10px;padding:14px 18px;flex:1;min-width:110px}}
+        .val{{font-size:22px;font-weight:bold;margin:4px 0 2px}}
+        .lbl{{font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px}}
+        h2{{border-left:3px solid #00ffcc;padding-left:12px;margin:24px 0 10px;font-size:13px;color:#aaa;text-transform:uppercase;letter-spacing:1px}}
+        table{{width:100%;border-collapse:collapse;background:#111;border-radius:10px;overflow:hidden;margin-bottom:20px}}
+        th,td{{padding:10px 13px;text-align:left;border-bottom:1px solid #1a1a1a;font-size:12px}}
+        th{{background:#1a1a1a;color:#00ffcc;font-size:10px;text-transform:uppercase;letter-spacing:1px}}
+        .charts{{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:20px}}
+        .chart-box{{background:#111;border:1px solid #1a1a1a;border-radius:10px;padding:16px;flex:1;min-width:300px}}
+        .chart-box h3{{margin:0 0 12px;font-size:11px;color:#555;text-transform:uppercase;letter-spacing:1px}}
+    </style>
+    </head><body><div class="wrap">
+
+    <div class="hdr">
+        <div>
+            <h1 style="margin:0;font-size:18px">ANALYTICS <span style="color:#555;font-size:12px">{mode}</span></h1>
+            <div style="font-size:10px;color:#444;margin-top:3px">Rendimiento histórico — Scalping Bot 15m</div>
+        </div>
+        <a href="/dashboard" style="padding:7px 14px;border-radius:8px;border:1px solid #33333388;background:#1616160d;color:#888;font-size:11px;font-weight:bold;text-decoration:none">← Dashboard</a>
+    </div>
+
+    <!-- Key metrics -->
+    <div class="stats">
+        <div class="card"><div class="lbl">Total Trades</div><div class="val" style="color:#00ffcc">{total_tr}</div></div>
+        <div class="card"><div class="lbl">Win Rate</div><div class="val" style="color:{'#00e676' if wr_pct>=40 else ('#ffd740' if wr_pct>=30 else '#ff5252')}">{wr_pct:.1f}%</div>
+            <div style="font-size:10px;color:#444">{n_wins}W / {n_be}BE / {n_losses}L</div></div>
+        <div class="card"><div class="lbl">Profit Factor</div><div class="val" style="color:{pf_color}">{pf_str}</div>
+            <div style="font-size:10px;color:#444">Σwins / |Σlosses|</div></div>
+        <div class="card"><div class="lbl">Expectancy</div><div class="val" style="color:{exp_color}">{exp_str}</div>
+            <div style="font-size:10px;color:#444">por trade</div></div>
+        <div class="card"><div class="lbl">PnL Total</div><div class="val" style="color:{'#00e676' if total_pnl_g>=0 else '#ff5252'}">${total_pnl_g:+.2f}</div></div>
+        <div class="card"><div class="lbl">Max Drawdown</div><div class="val" style="color:#ff5252">${max_dd:.2f}</div>
+            <div style="font-size:10px;color:#444">desde el pico</div></div>
+    </div>
+
+    <!-- Charts -->
+    <div class="charts">
+        <div class="chart-box" style="flex:2;min-width:400px">
+            <h3>Curva de equity — PnL acumulado diario</h3>
+            <canvas id="equityChart" height="120"></canvas>
+        </div>
+        <div class="chart-box" style="flex:1;min-width:280px">
+            <h3>PnL promedio por hora UTC</h3>
+            <canvas id="hourlyChart" height="120"></canvas>
+        </div>
+    </div>
+
+    <!-- Strategy x Side -->
+    <h2>Rendimiento por Estrategia × Lado</h2>
+    <table><thead><tr>
+        <th>Estrategia</th><th>Lado</th><th>Trades</th><th>WR%</th>
+        <th>W / BE / L</th><th>Profit Factor</th><th>Expectancy</th><th>PnL Total</th>
+    </tr></thead><tbody>{rows_strat_side()}</tbody></table>
+
+    <!-- Monthly -->
+    <h2>Performance Mensual</h2>
+    <table><thead><tr>
+        <th>Mes</th><th>Trades</th><th>WR%</th><th>W / BE / L</th><th>PnL Total</th><th>Avg/Trade</th>
+    </tr></thead><tbody>{rows_monthly()}</tbody></table>
+
+    <!-- Day of week -->
+    <h2>Performance por Día de Semana (hora local)</h2>
+    <table><thead><tr>
+        <th>Día</th><th>Trades</th><th>WR%</th><th>Wins</th><th>Losses</th><th>PnL Total</th>
+    </tr></thead><tbody>{rows_dow()}</tbody></table>
+
+    <!-- Best symbols -->
+    <h2>Top 10 Símbolos — Mejor PnL</h2>
+    <table><thead><tr>
+        <th>Símbolo</th><th>Estrategia</th><th>Trades</th><th>WR%</th>
+        <th>Profit Factor</th><th>Avg Win</th><th>Avg Loss</th><th>PnL Total</th>
+    </tr></thead><tbody>{rows_symbols(top10, "#00e676")}</tbody></table>
+
+    <!-- Worst symbols -->
+    <h2>Top 10 Símbolos — Peor PnL</h2>
+    <table><thead><tr>
+        <th>Símbolo</th><th>Estrategia</th><th>Trades</th><th>WR%</th>
+        <th>Profit Factor</th><th>Avg Win</th><th>Avg Loss</th><th>PnL Total</th>
+    </tr></thead><tbody>{rows_symbols(bottom10, "#ff5252")}</tbody></table>
+
+    <script>
+    Chart.defaults.color = '#555';
+    Chart.defaults.borderColor = '#1a1a1a';
+
+    // Equity curve
+    const eqCtx = document.getElementById('equityChart').getContext('2d');
+    const eqData = {eq_values_js};
+    const eqLabels = {eq_labels_js};
+    const eqDaily = {eq_daily_js};
+    new Chart(eqCtx, {{
+        type: 'line',
+        data: {{
+            labels: eqLabels,
+            datasets: [
+                {{
+                    label: 'PnL Acumulado ($)',
+                    data: eqData,
+                    borderColor: '#00bcd4',
+                    backgroundColor: 'rgba(0,188,212,0.08)',
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: eqData.length > 30 ? 0 : 3,
+                    borderWidth: 2,
+                }},
+                {{
+                    label: 'PnL Diario ($)',
+                    data: eqDaily,
+                    type: 'bar',
+                    backgroundColor: eqDaily.map(v => v >= 0 ? 'rgba(0,230,118,0.5)' : 'rgba(255,82,82,0.5)'),
+                    yAxisID: 'y2',
+                    order: 2,
+                }}
+            ]
+        }},
+        options: {{
+            responsive: true,
+            plugins: {{ legend: {{ labels: {{ color:'#666', font:{{ size:10 }} }} }} }},
+            scales: {{
+                x: {{ ticks: {{ color:'#444', maxTicksLimit:8 }}, grid:{{ color:'#111' }} }},
+                y: {{ ticks: {{ color:'#555', callback: v => '$'+v.toFixed(0) }}, grid:{{ color:'#1a1a1a' }} }},
+                y2: {{ display: false, grid: {{ display: false }} }}
+            }}
+        }}
+    }});
+
+    // Hourly bar chart
+    const hrCtx = document.getElementById('hourlyChart').getContext('2d');
+    const hrPnl = {hourly_pnl_js};
+    new Chart(hrCtx, {{
+        type: 'bar',
+        data: {{
+            labels: {hourly_lbl_js},
+            datasets: [{{
+                label: 'Avg PnL ($)',
+                data: hrPnl,
+                backgroundColor: hrPnl.map(v => v >= 0 ? 'rgba(0,230,118,0.65)' : 'rgba(255,82,82,0.65)'),
+                borderRadius: 3,
+            }}]
+        }},
+        options: {{
+            responsive: true,
+            plugins: {{ legend: {{ display: false }} }},
+            scales: {{
+                x: {{ ticks:{{ color:'#555', font:{{ size:9 }} }}, grid:{{ color:'#111' }} }},
+                y: {{ ticks:{{ color:'#555', callback: v => '$'+v.toFixed(2) }}, grid:{{ color:'#1a1a1a' }} }}
+            }}
+        }}
+    }});
+    </script>
+    </div></body></html>"""
 
 
 @app.post("/admin/reset")
