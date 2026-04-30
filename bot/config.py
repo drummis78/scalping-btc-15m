@@ -37,10 +37,9 @@ class Settings(BaseSettings):
     ADX_THRESHOLD:            float = 25.0   # ADX(14) mínimo — sin momentum el breakout revierte
 
     FUNDAMENTAL_ENABLED:       bool = True
-    FUNDAMENTAL_POLL_INTERVAL: int  = 600   # 10 minutos — más frecuente para scalping
+    FUNDAMENTAL_POLL_INTERVAL: int  = 1800
     NEWSAPI_KEY:               str  = ""
     GROQ_API_KEY:              str  = ""
-    CRYPTOPANIC_API_KEY:       str  = ""    # opcional — mejora rate limits del feed público
 
     DATABASE_URL:  str = ""           # Railway lo setea automático al conectar PostgreSQL
     LOG_FILE:      str = "bot/logs/trading.log"

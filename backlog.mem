@@ -1,0 +1,74 @@
+# BACKLOG — Implementar cuando el bot esté estable (mínimo 3-5 días operando)
+
+## Objetivo
+Agregar capas de monitoreo shadow (solo observan, NUNCA bloquean señales).
+Cada capa loguea su decisión en result_json para análisis posterior en Métricas.
+
+---
+
+## 1. Monitores Shadow (4 capas)
+
+### 1.1 Macro Regime (EMA20/50 semanal BTC)
+- Detecta régimen: BULL / BEAR / NEUTRAL
+- Shadow: si estuviera activo, ¿hubiera bloqueado? ¿era win o loss?
+- Datos a mostrar en dashboard:
+  - Régimen actual + timestamp
+  - EMA20 y EMA50 con valores
+  - Contador: bloqueado / eran wins / eran losses / señales totales
+
+### 1.2 CVD / Taker Buy Ratio (15m)
+- LONG bloqueado si TBR < 0.50 · SHORT bloqueado si TBR > 0.50
+- Shadow: igual que arriba
+- Datos a mostrar: bloqueado / eran wins / eran losses / señales totales
+
+### 1.3 XGBoost AI Classifier
+- Entrena con historial de trades (mínimo 40 muestras)
+- Predice probabilidad de win por señal
+- Datos a mostrar: accuracy, F1 score, muestras, trades nuevos
+- Estado inicial: "ENTRENANDO - acumulando datos (X/40 mínimo)"
+
+### 1.4 Fundamental + Groq AI
+- Fuentes: Fear & Greed Index, CryptoPanic, GDELT, Calendario FOMC/CPI, NewsAPI (opcional)
+- IA: Groq LLaMA 3.3-70B (free tier, cache 5 min)
+- Dos sub-bloques en dashboard:
+  a) GROQ: acción (ok/no_long/no_short/block) + confianza + stats
+  b) Reglas shadow: ventanas FOMC/CPI, impact >= 8, sentimiento
+- Variables de entorno: GROQ_API_KEY, FUNDAMENTAL_ENABLED=true, CRYPTOPANIC_API_KEY (opcional)
+
+---
+
+## 2. Botón "📊 Métricas" en header del dashboard
+- href="/analytics" (página separada con charts)
+- Posición: arriba a la derecha, al lado del balance
+- Ya tiene ruta /analytics implementada con:
+  - Equity curve (Chart.js)
+  - Performance por hora del día
+  - Performance por día de semana
+  - Tabla por estrategia × lado
+  - Top/bottom símbolos
+  - Métricas globales (WR%, profit factor, avg win/loss, expectancy)
+
+---
+
+## 3. Skill /fundamental-groq
+- Archivo: ~/.claude/skills/fundamental-groq.md
+- Documenta la implementación reutilizable de Fundamental + Groq para otros bots
+- Ver skill para detalles de integración
+
+---
+
+## 4. Fix AI Classifier query
+- En bot/ai_classifier.py, la query usa `sl.impact_score` que no existe en signal_log
+- Corrección: usar `sl.fund_impact AS impact_score`
+- Aplicar antes de implementar el AI Classifier
+
+---
+
+## Notas de implementación
+- Todos los monitores shadow se implementan en archivos separados:
+  bot/macro_regime.py, bot/cvd_monitor.py, bot/ai_classifier.py
+- El fundamental.py ya existe pero en versión básica — reemplazar con versión Groq
+- En main.py: importar monitors, llamar en _process_signal, agregar campos a result_data
+- Shadow mode: allow = True siempre, solo loguear decisiones
+- Ver commits anteriores del repo para implementación de referencia:
+  ae27ec0 (AI Classifier), 90a5f70 (Macro+CVD), 04df7b4 (fundamental), b442075 (Groq)
