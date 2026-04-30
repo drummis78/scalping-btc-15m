@@ -21,6 +21,15 @@ Cada capa loguea su decisión en result_json para análisis posterior en Métric
 - [ ] Verificar que los otros bots (bot-4h, bot-1h-v1) estén ejecutando señales (no están operando actualmente)
 - [ ] Implementar seguridad (WEBHOOK_SECRET, Basic Auth) en bot-4h y bot-1h-v1
 
+### PASO 1.A — Fix: Clasificar BE (Breakeven) como categoría separada
+- PROBLEMA: Trades donde el SL fue movido a BE y cierra en 0 se cuentan como wins, inflando el WR%
+- SOLUCIÓN: Detectar cierre por BE y registrar outcome = "be" (ni win ni loss)
+  - En bot/state.py: al cerrar una posición, si el PnL neto ≈ 0 y el SL fue movido a entry price → outcome = "be"
+  - En signal_log: el campo result_json debe soportar outcome: "win" | "loss" | "be" | "pending"
+  - En dashboard y /analytics: mostrar tres columnas separadas — Wins / Losses / BE
+  - El WR% se calcula solo sobre wins+losses (excluyendo BE), y mostrar BE% por separado
+  - Métricas globales: win_count, loss_count, be_count, wr_pct (sin BE), be_pct
+
 ### PASO 1 — Fix: Resultado de filtro nunca queda Pendiente
 - PROBLEMA: Señales con verdict "pendiente" que nunca se resuelven
 - SOLUCIÓN: El resultado del filtro debe resolverse siempre (win/loss)
