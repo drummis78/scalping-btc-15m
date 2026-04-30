@@ -1178,6 +1178,7 @@ async def dashboard():
             </div>
         </div>
         <div style="display:flex;align-items:center;gap:16px">
+            <a href="/analytics" style="padding:7px 16px;border-radius:8px;border:1px solid #9c27b044;background:#9c27b011;color:#9c27b0;font-size:12px;font-weight:bold;text-decoration:none">📊 Analytics</a>
             <div style="text-align:right">
                 <div class="lbl">Balance</div>
                 <div class="val">${bal:,.2f}</div>
@@ -1300,7 +1301,6 @@ async def dashboard():
             <button class="tab active" onclick="filterTab('all',this)">Todas</button>
             <button class="tab" onclick="filterTab('donchian',this)" style="border-color:#00bcd444;color:#00bcd4">15m Donchian</button>
             <button class="tab" onclick="filterTab('tcp',this)" style="border-color:#ff980044;color:#ff9800">TCP 15m</button>
-            <a href="/analytics" style="padding:7px 16px;border-radius:8px;border:1px solid #9c27b044;background:transparent;color:#9c27b0;font-size:12px;font-weight:bold;text-decoration:none;line-height:1.5">📊 Analytics</a>
             </div>
         <div style="display:flex;gap:8px">
             <button onclick="resetBot('15m')" style="padding:7px 14px;border-radius:8px;border:1px solid #ff525244;background:#ff52520d;color:#ff5252;cursor:pointer;font-size:11px;font-weight:bold">🗑 Reset 15m Bot</button>
