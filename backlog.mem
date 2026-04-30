@@ -8,6 +8,13 @@ Cada capa loguea su decisión en result_json para análisis posterior en Métric
 
 ## ORDEN DE EJECUCIÓN (respetar secuencia)
 
+### PENDIENTE MENOR — Revisar build number en dashboard-general
+- [ ] El build number no aparece visible en el header del dashboard-general (dashbot.up.railway.app)
+- Puede ser cache de Railway, placeholder __BUILD__ no reemplazado, o el span con color:#444 queda invisible
+- Verificar cuando se retome la sesión
+
+---
+
 ### PASO 0 — Prerequisitos antes de agregar features
 - [ ] Quitar la capa fundamental actual (bot/fundamental.py básica) ANTES de agregar la nueva con Groq
 - [ ] Eliminar el tab "Analytics" del bot ANTES de agregar el tab "Métricas"
