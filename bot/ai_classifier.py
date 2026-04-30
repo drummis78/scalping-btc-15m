@@ -205,7 +205,7 @@ async def _build_training_data_from_db(pool) -> pd.DataFrame:
         rows = await conn.fetch("""
             SELECT
                 sl.ts, sl.side, sl.strategy, sl.chop_val,
-                sl.impact_score, sl.result_json,
+                sl.fund_impact AS impact_score, sl.result_json,
                 t.close_reason, t.pnl
             FROM signal_log sl
             JOIN trades t ON (
