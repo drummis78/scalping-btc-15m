@@ -258,16 +258,6 @@ async def _process_signal(sig: dict):
     result_data["groq_action"]             = _fund_groq_action
     result_data["groq_reason"]             = _fund_groq_reason
     result_data["groq_confidence"]         = _fund_groq_conf
-    # Shadow flags del scanner (calidad de la señal — nunca bloquean)
-    result_data["scan_shadow_would_block"] = sig.get("shadow_would_block", False)
-    result_data["scan_shadow_filters"]     = sig.get("shadow_filters", "ok")
-    result_data["scan_shadow_atrpct"]      = sig.get("shadow_atrpct", 0.0)
-    result_data["scan_shadow_adx"]         = sig.get("shadow_adx", 0.0)
-    result_data["scan_shadow_vol_ok"]      = sig.get("shadow_vol_ok", True)
-    result_data["scan_shadow_body_ok"]     = sig.get("shadow_body_ok", True)
-    result_data["scan_shadow_regime_ok"]   = sig.get("shadow_regime_ok", True)
-    result_data["scan_shadow_trend_ok"]    = sig.get("shadow_trend_ok", True)
-    result_data["scan_shadow_funding_ok"]  = sig.get("shadow_funding_ok", True)
 
     await log_signal(ts, symbol, side, price, sl_price, tp_price,
                      _fund_allow, _fund_reason, _fund_impact,
