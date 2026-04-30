@@ -475,7 +475,8 @@ class FundamentalFilter:
 
         try:
             client = AsyncOpenAI(api_key=settings.GROQ_API_KEY,
-                                 base_url="https://api.groq.com/openai/v1")
+                                 base_url="https://api.groq.com/openai/v1",
+                                 timeout=8.0)
             resp = await client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 max_tokens=150,

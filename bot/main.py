@@ -197,6 +197,7 @@ async def _process_signal(sig: dict):
     # Fundamental filter — shadow mode (nunca bloquea, solo observa)
     # Pasa side y macro_regime para que Groq tenga contexto completo
     fund = await fundamental_filter.check(symbol, side=side, macro_regime=mr_regime)
+    _fund_allow        = True  # siempre True — shadow mode puro
     _fund_reason       = fund["reason"]
     _fund_impact       = fund.get("impact_score", 0.0)
     _fund_shadow_block = fund.get("shadow_would_block", False)
@@ -1299,7 +1300,7 @@ async def dashboard():
             <button class="tab active" onclick="filterTab('all',this)">Todas</button>
             <button class="tab" onclick="filterTab('donchian',this)" style="border-color:#00bcd444;color:#00bcd4">15m Donchian</button>
             <button class="tab" onclick="filterTab('tcp',this)" style="border-color:#ff980044;color:#ff9800">TCP 15m</button>
-            <button class="tab" onclick="filterTab('analytics',this)" style="border-color:#9c27b044;color:#9c27b0">📊 Analytics</button>
+            <a href="/analytics" style="padding:7px 16px;border-radius:8px;border:1px solid #9c27b044;background:transparent;color:#9c27b0;font-size:12px;font-weight:bold;text-decoration:none;line-height:1.5">📊 Analytics</a>
             </div>
         <div style="display:flex;gap:8px">
             <button onclick="resetBot('15m')" style="padding:7px 14px;border-radius:8px;border:1px solid #ff525244;background:#ff52520d;color:#ff5252;cursor:pointer;font-size:11px;font-weight:bold">🗑 Reset 15m Bot</button>
@@ -1374,13 +1375,6 @@ async def dashboard():
     <div class="refresh-note">Auto-refresh cada 60s</div>
     </div><!-- /dash-main -->
 
-    <div id="analytics-section" style="display:none;margin-top:8px">
-      <iframe id="anl-frame"
-        style="width:100%;height:calc(100vh - 185px);border:none;border-radius:10px;background:#111"
-        data-src="/analytics">
-      </iframe>
-    </div>
-
     <div id="_modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.75);z-index:9999;align-items:center;justify-content:center">
       <div style="background:#1a1a1a;border:1px solid #333;border-radius:12px;padding:24px;width:340px">
         <div id="_mtitle" style="font-size:15px;font-weight:bold;margin-bottom:8px"></div>
@@ -1403,23 +1397,12 @@ async def dashboard():
         _activeTab = strat;
         document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
-        const dashMain = document.getElementById('dash-main');
-        const anlSection = document.getElementById('analytics-section');
-        if (strat === 'analytics') {{
-            dashMain.style.display = 'none';
-            anlSection.style.display = 'block';
-            const iframe = document.getElementById('anl-frame');
-            if (!iframe.src) iframe.src = iframe.dataset.src;
-        }} else {{
-            dashMain.style.display = 'block';
-            anlSection.style.display = 'none';
-            ['tbl-pos','tbl-trades','tbl-sig'].forEach(id => {{
-                document.querySelectorAll('#'+id+' tbody tr[data-strat]').forEach(row => {{
-                    if (strat === 'all' || row.dataset.strat === strat) row.classList.remove('hidden');
-                    else row.classList.add('hidden');
-                }});
+        ['tbl-pos','tbl-trades','tbl-sig'].forEach(id => {{
+            document.querySelectorAll('#'+id+' tbody tr[data-strat]').forEach(row => {{
+                if (strat === 'all' || row.dataset.strat === strat) row.classList.remove('hidden');
+                else row.classList.add('hidden');
             }});
-        }}
+        }});
     }}
     const _hasSecret = {'true' if settings.WEBHOOK_SECRET else 'false'};
     let _mok = null;
