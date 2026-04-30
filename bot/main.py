@@ -1324,9 +1324,6 @@ async def dashboard():
     <h2>Cooldown — Racha de pérdidas</h2>
     {_build_cooldown_panel()}
 
-    <h2>Filtro Fundamental (IA)</h2>
-    {_build_fund_panel(fund_status_row, fund_news_24h, fund_last_news, fund_blocks_total, fund_blocks_24h)}
-
     <h2>Efectividad de filtros</h2>
     <div style="font-size:11px;color:#555;margin-bottom:10px">
         <b style="color:#00e676">Correcto</b> = hubiera perdido (filtro acertó) &nbsp;|&nbsp;
