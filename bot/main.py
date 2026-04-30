@@ -925,8 +925,21 @@ async def dashboard():
                             f'— {ts_cd}'
                             f'</div>')
 
+        _cd_status_badge = (
+            f'<div style="padding:5px 12px;border-radius:6px;font-size:12px;font-weight:bold;'
+            f'background:#ff52521a;border:1px solid #ff525244;color:#ff5252">'
+            f'🔴 ACTIVO — {cooldown_remaining_min} min restantes</div>'
+            if cooldown_active else
+            f'<div style="padding:5px 12px;border-radius:6px;font-size:12px;font-weight:bold;'
+            f'background:#00e67622;border:1px solid #00e67644;color:#00e676">🟢 APAGADO</div>'
+        )
+
         return f"""
         <div style="background:#141414;border:1px solid #222;border-radius:10px;padding:14px 18px;margin-bottom:16px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+                <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px">Estado del cooldown</div>
+                {_cd_status_badge}
+            </div>
             <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start">
                 <div>
                     <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Racha actual</div>

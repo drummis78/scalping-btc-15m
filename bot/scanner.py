@@ -371,6 +371,11 @@ async def scan_symbol_tcp(exchange: ccxt_async.binance, config: dict) -> Optiona
         if pd.isna(rsi) or ema20 == 0 or ema50 == 0:
             return None
 
+        # Filtro micro-cap: tokens con precio muy bajo tienen ATR% desproporcionado
+        if last_close < 0.005:
+            logger.debug(f"[TCP] {symbol} precio muy bajo ({last_close:.6f}) — omitido por micro-cap filter")
+            return None
+
         # ── TCP LONG ──────────────────────────────────────────────────────────
         if ema20 > ema50:
             touched = last_low <= ema20 * (1 + TCP_ZONE_PCT) and last_close >= ema20 * (1 - TCP_ZONE_PCT)
