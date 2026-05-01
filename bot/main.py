@@ -41,9 +41,9 @@ logging.basicConfig(
 logger = logging.getLogger("scalping_bot")
 
 # Build info — actualizar en cada deploy
-BUILD        = "2026-05-01 #002"
-BUILD_COMMIT = "3b3fee1"
-BUILD_NOTES  = "Cooldown independiente por estrategia — Donchian y TCP no se bloquean entre sí"
+BUILD        = "2026-05-01 #003"
+BUILD_COMMIT = "b34efbe"
+BUILD_NOTES  = "BE clasificado como categoría separada · Wins/Losses/BE en stats diarios y totales"
 
 # Símbolos cargados una vez al startup
 _symbols: list[dict] = []
