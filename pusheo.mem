@@ -39,3 +39,6 @@
 ## 2026-05-01
 
 [~00:00 ART] | scalping-btc-15m | 48bd26e | feat: build number + notas en card de balance del dashboard
+[~00:10 ART] | scalping-btc-15m | 793a7c7 | feat: agregar commit hash al build info del dashboard
+[~00:15 ART] | scalping-btc-15m | b497db3 | chore: actualizar BUILD_COMMIT al hash correcto
+[~00:20 ART] | scalping-btc-15m | 3b3fee1 | feat: cooldown independiente por estrategia (donchian vs tcp)
