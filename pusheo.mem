@@ -46,3 +46,5 @@
 [~00:45 ART] | scalping-btc-15m | b34efbe | feat: BE clasificado como categoria separada — wins/losses/BE en stats
 [~01:00 ART] | scalping-btc-15m | 50823d0 | chore: BUILD #003 + pusheo.mem
 [~01:10 ART] | scalping-btc-15m | 19a06da | feat: agregar fila totales acumulados en dashboard
+[~01:20 ART] | scalping-btc-15m | 88a2792 | chore: BUILD #004 + pusheo.mem
+[~01:30 ART] | scalping-btc-15m | d2a31d5 | feat: estrategia cards con sub-filas Hoy y Total acumulado
