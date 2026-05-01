@@ -528,12 +528,20 @@ async def dashboard():
         strat_rows = [dict(r) for r in await conn.fetch("""
             SELECT strategy,
                    COUNT(*) trades,
-                   SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) wins,
+                   SUM(CASE WHEN pnl>0 AND NOT COALESCE(is_be,FALSE) THEN 1 ELSE 0 END) wins,
                    ROUND(SUM(pnl)::numeric,2) total_pnl,
                    SUM(CASE WHEN close_reason='tp_hit' THEN 1 ELSE 0 END) tp_hits,
                    SUM(CASE WHEN close_reason='sl_hit' THEN 1 ELSE 0 END) sl_hits
             FROM trades GROUP BY strategy ORDER BY strategy
         """)]
+        totals_row = dict(await conn.fetchrow("""
+            SELECT COUNT(*) trades,
+                   COALESCE(ROUND(SUM(pnl)::numeric,2), 0) total_pnl,
+                   SUM(CASE WHEN pnl>0  AND NOT COALESCE(is_be,FALSE) THEN 1 ELSE 0 END) wins,
+                   SUM(CASE WHEN pnl<=0 AND NOT COALESCE(is_be,FALSE) THEN 1 ELSE 0 END) losses,
+                   SUM(CASE WHEN COALESCE(is_be,FALSE) THEN 1 ELSE 0 END) be_count
+            FROM trades
+        """) or {})
         chop_analysis = [dict(r) for r in await conn.fetch("""
             SELECT
                 CASE
@@ -1033,6 +1041,7 @@ async def dashboard():
         </div>
     </div>
 
+    <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;padding:0 2px">Hoy</div>
     <div class="stats">
         <div class="card"><div class="lbl">PnL hoy</div><div class="val {pnl_class}">${pnl_d:+.2f}</div></div>
         <div class="card"><div class="lbl">Posiciones abiertas</div><div class="val">{len(pos)}</div></div>
@@ -1040,6 +1049,16 @@ async def dashboard():
         <div class="card"><div class="lbl">Wins hoy</div><div class="val pos">{daily.get('win_count',0)}</div></div>
         <div class="card"><div class="lbl">Losses hoy</div><div class="val neg">{daily.get('loss_count',0)}</div></div>
         <div class="card"><div class="lbl">BE hoy</div><div class="val" style="color:#ffa500">{daily.get('be_count',0)}</div></div>
+    </div>
+
+    <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin:12px 0 4px;padding:0 2px">Totales acumulados</div>
+    <div class="stats">
+        <div class="card"><div class="lbl">PnL total</div><div class="val {'pos' if (totals_row.get('total_pnl') or 0) >= 0 else 'neg'}">${(totals_row.get('total_pnl') or 0):+.2f}</div></div>
+        <div class="card"><div class="lbl">Posiciones abiertas</div><div class="val">{len(pos)}</div></div>
+        <div class="card"><div class="lbl">Trades totales</div><div class="val">{totals_row.get('trades') or 0}</div></div>
+        <div class="card"><div class="lbl">Wins totales</div><div class="val pos">{totals_row.get('wins') or 0}</div></div>
+        <div class="card"><div class="lbl">Losses totales</div><div class="val neg">{totals_row.get('losses') or 0}</div></div>
+        <div class="card"><div class="lbl">BE totales</div><div class="val" style="color:#ffa500">{totals_row.get('be_count') or 0}</div></div>
     </div>
 
     <h2>Rendimiento por estrategia</h2>
