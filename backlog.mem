@@ -8,6 +8,26 @@ Cada capa loguea su decisión en result_json para análisis posterior en Métric
 
 ## ORDEN DE EJECUCIÓN (respetar secuencia)
 
+### PENDIENTE — Backup de señales fuera de la DB
+
+**Contexto**: `signal_log` ya captura todo en Postgres (persiste entre deploys). Pero si la DB se borra manualmente o hay un problema en Railway, se pierde el historial completo.
+
+**Opción A — Endpoint de exportación (sin costo, recomendado primero)**
+- [ ] Agregar `GET /export/signals.csv` (o `.jsonl`) con auth Basic
+- Descarga el `signal_log` completo como archivo plano
+- El usuario lo descarga manualmente cuando quiera como backup
+- Incluir todos los campos: ts, symbol, side, price, sl, tp, verdict, result_json, fund_reason, fund_impact, strategy, chop_val
+
+**Opción B — JSONL append automático con Railway Volume (costo extra)**
+- [ ] Montar un Railway Volume en `/data/`
+- [ ] En `log_signal()` de state.py: append a `/data/signals.jsonl` además de insertar en DB
+- Sobrevive reinicios, NO sobrevive borrado del Volume
+- Requiere Railway Volume addon (~$0.25/GB/mes)
+
+**Recomendación**: Hacer A primero (gratis), evaluar B cuando haya suficiente historial que justifique el costo.
+
+---
+
 ### PENDIENTE MENOR — Revisar build number en dashboard-general
 - [ ] El build number no aparece visible en el header del dashboard-general (dashbot.up.railway.app)
 - Puede ser cache de Railway, placeholder __BUILD__ no reemplazado, o el span con color:#444 queda invisible
