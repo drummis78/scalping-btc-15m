@@ -44,3 +44,5 @@
 [~00:20 ART] | scalping-btc-15m | 3b3fee1 | feat: cooldown independiente por estrategia (donchian vs tcp)
 [~00:30 ART] | scalping-btc-15m | d66b4fe | chore: BUILD #002 + pusheo.mem
 [~00:45 ART] | scalping-btc-15m | b34efbe | feat: BE clasificado como categoria separada — wins/losses/BE en stats
+[~01:00 ART] | scalping-btc-15m | 50823d0 | chore: BUILD #003 + pusheo.mem
+[~01:10 ART] | scalping-btc-15m | 19a06da | feat: agregar fila totales acumulados en dashboard

@@ -41,9 +41,9 @@ logging.basicConfig(
 logger = logging.getLogger("scalping_bot")
 
 # Build info — actualizar en cada deploy
-BUILD        = "2026-05-01 #003"
-BUILD_COMMIT = "b34efbe"
-BUILD_NOTES  = "BE clasificado como categoría separada · Wins/Losses/BE en stats diarios y totales"
+BUILD        = "2026-05-01 #004"
+BUILD_COMMIT = "19a06da"
+BUILD_NOTES  = "Totales acumulados: PnL/trades/wins/losses/BE separados de stats de hoy"
 
 # Símbolos cargados una vez al startup
 _symbols: list[dict] = []
