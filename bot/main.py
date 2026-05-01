@@ -529,10 +529,26 @@ async def dashboard():
             SELECT strategy,
                    COUNT(*) trades,
                    SUM(CASE WHEN pnl>0 AND NOT COALESCE(is_be,FALSE) THEN 1 ELSE 0 END) wins,
+                   SUM(CASE WHEN pnl<=0 AND NOT COALESCE(is_be,FALSE) THEN 1 ELSE 0 END) losses,
+                   SUM(CASE WHEN COALESCE(is_be,FALSE) THEN 1 ELSE 0 END) be_count,
                    ROUND(SUM(pnl)::numeric,2) total_pnl,
                    SUM(CASE WHEN close_reason='tp_hit' THEN 1 ELSE 0 END) tp_hits,
                    SUM(CASE WHEN close_reason='sl_hit' THEN 1 ELSE 0 END) sl_hits
             FROM trades GROUP BY strategy ORDER BY strategy
+        """)]
+        strat_today_rows = [dict(r) for r in await conn.fetch("""
+            SELECT strategy,
+                   COUNT(*) trades,
+                   SUM(CASE WHEN pnl>0 AND NOT COALESCE(is_be,FALSE) THEN 1 ELSE 0 END) wins,
+                   SUM(CASE WHEN pnl<=0 AND NOT COALESCE(is_be,FALSE) THEN 1 ELSE 0 END) losses,
+                   SUM(CASE WHEN COALESCE(is_be,FALSE) THEN 1 ELSE 0 END) be_count,
+                   ROUND(SUM(pnl)::numeric,2) total_pnl,
+                   SUM(CASE WHEN close_reason='tp_hit' THEN 1 ELSE 0 END) tp_hits,
+                   SUM(CASE WHEN close_reason='sl_hit' THEN 1 ELSE 0 END) sl_hits
+            FROM trades
+            WHERE DATE(close_time::timestamptz AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                  = (NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+            GROUP BY strategy ORDER BY strategy
         """)]
         totals_row = dict(await conn.fetchrow("""
             SELECT COUNT(*) trades,
@@ -648,36 +664,52 @@ async def dashboard():
         {"key": "donchian", "label": "15m Donchian", "color": "#00bcd4", "sym": len(_symbols)},
         {"key": "tcp",      "label": "TCP 15m",      "color": "#ff9800", "sym": len(_symbols)},
     ]
-    strat_by_key = {r["strategy"]: r for r in strat_rows}
+    strat_by_key       = {r["strategy"]: r for r in strat_rows}
+    strat_today_by_key = {r["strategy"]: r for r in strat_today_rows}
 
     def badge(strat):
         cfg = next((s for s in STRATS if s["key"] == strat), None)
         c, lbl = (cfg["color"], cfg["label"]) if cfg else ("#aaa", strat)
         return f'<span style="background:{c}22;color:{c};padding:2px 7px;border-radius:4px;font-size:10px;font-weight:bold">{lbl}</span>'
 
-    def strat_card(s):
-        r = strat_by_key.get(s["key"])
-        t  = int(r["trades"])  if r else 0
-        w  = int(r["wins"])    if r else 0
-        tp = int(r["tp_hits"]) if r else 0
-        sl = int(r["sl_hits"]) if r else 0
+    def _strat_row_html(r, label: str, label_color: str):
+        t   = int(r["trades"])   if r else 0
+        w   = int(r["wins"])     if r else 0
+        lo  = int(r["losses"])   if r else 0
+        be  = int(r["be_count"]) if r else 0
+        tp  = int(r["tp_hits"])  if r else 0
+        sl  = int(r["sl_hits"])  if r else 0
         pnl = float(r["total_pnl"] or 0) if r else 0.0
-        wr  = w / t * 100 if t else 0
-        wr_color = "#00e676" if wr >= 40 else ("#ffa500" if wr >= 30 else "#ff5252")
+        wr  = w / (w + lo) * 100 if (w + lo) else 0
+        wr_color  = "#00e676" if wr >= 40 else ("#ffa500" if wr >= 30 else "#ff5252")
         pnl_color = "#00e676" if pnl >= 0 else "#ff5252"
+        return f"""
+            <div style="margin-bottom:10px">
+                <div style="font-size:9px;color:{label_color};text-transform:uppercase;letter-spacing:1px;margin-bottom:5px">{label}</div>
+                <div style="display:flex;gap:16px;flex-wrap:wrap">
+                    <div><div class="sval">{t}</div><div class="slbl">trades</div></div>
+                    <div><div class="sval" style="color:{wr_color}">{wr:.1f}%</div><div class="slbl">WR</div></div>
+                    <div><div class="sval" style="color:{pnl_color}">${pnl:+.2f}</div><div class="slbl">PnL</div></div>
+                    <div><div class="sval" style="color:#00e676">{w}</div><div class="slbl">wins</div></div>
+                    <div><div class="sval" style="color:#ff5252">{lo}</div><div class="slbl">losses</div></div>
+                    <div><div class="sval" style="color:#ffa500">{be}</div><div class="slbl">BE</div></div>
+                    <div><div class="sval" style="color:#888">{tp}/{sl}</div><div class="slbl">TP/SL</div></div>
+                </div>
+            </div>"""
+
+    def strat_card(s):
+        r_tot = strat_by_key.get(s["key"])
+        r_hoy = strat_today_by_key.get(s["key"])
         c = s["color"]
         return f"""
         <div class="scard" data-strat="{s['key']}" style="border-top:3px solid {c}">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
                 <span style="color:{c};font-weight:bold;font-size:13px">{s['label']}</span>
                 <span style="color:#555;font-size:10px">{s['sym']} simbolos</span>
             </div>
-            <div style="display:flex;gap:20px">
-                <div><div class="sval">{t}</div><div class="slbl">trades</div></div>
-                <div><div class="sval" style="color:{wr_color}">{wr:.1f}%</div><div class="slbl">WR</div></div>
-                <div><div class="sval" style="color:{pnl_color}">${pnl:+.2f}</div><div class="slbl">PnL</div></div>
-                <div><div class="sval" style="color:#888">{tp}/{sl}</div><div class="slbl">TP/SL</div></div>
-            </div>
+            {_strat_row_html(r_hoy, 'Hoy', '#555')}
+            <div style="border-top:1px solid #1e1e1e;margin:6px 0 10px"></div>
+            {_strat_row_html(r_tot, 'Total acumulado', '#333')}
         </div>"""
 
     strat_cards_html = "".join(strat_card(s) for s in STRATS)
