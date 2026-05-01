@@ -42,7 +42,7 @@ logger = logging.getLogger("scalping_bot")
 
 # Build info — actualizar en cada deploy
 BUILD        = "2026-05-01 #001"
-BUILD_COMMIT = "729a2c2"
+BUILD_COMMIT = "793a7c7"
 BUILD_NOTES  = "Revert a estado 2026-04-29 12hs · backlog.mem + pusheo.mem · sin shadow monitors"
 
 # Símbolos cargados una vez al startup
