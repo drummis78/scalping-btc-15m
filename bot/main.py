@@ -788,9 +788,14 @@ async def dashboard():
             strat_trades = [t for t in trades if (t.get("strategy") or "") == strat_name]
             if not strat_trades:
                 return 0, None
+            first = strat_trades[0]
+            if first.get("is_be"):
+                return 0, str(first.get("close_time", ""))[:19]
             streak = 0
-            sign = 1 if (strat_trades[0].get("pnl") or 0) > 0 else -1
+            sign = 1 if (first.get("pnl") or 0) > 0 else -1
             for tr in strat_trades:
+                if tr.get("is_be"):
+                    break
                 pnl = tr.get("pnl") or 0
                 if (pnl > 0 and sign == 1) or (pnl <= 0 and sign == -1):
                     streak += sign
@@ -1033,6 +1038,8 @@ async def dashboard():
         <div class="card"><div class="lbl">Posiciones abiertas</div><div class="val">{len(pos)}</div></div>
         <div class="card"><div class="lbl">Trades hoy</div><div class="val">{daily.get('trade_count',0)}</div></div>
         <div class="card"><div class="lbl">Wins hoy</div><div class="val pos">{daily.get('win_count',0)}</div></div>
+        <div class="card"><div class="lbl">Losses hoy</div><div class="val neg">{daily.get('loss_count',0)}</div></div>
+        <div class="card"><div class="lbl">BE hoy</div><div class="val" style="color:#ffa500">{daily.get('be_count',0)}</div></div>
     </div>
 
     <h2>Rendimiento por estrategia</h2>
@@ -1260,16 +1267,21 @@ async def api_stats(request: Request, _: None = Depends(_check_secret)):
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             "SELECT COUNT(*) total, COALESCE(SUM(pnl),0) total_pnl, "
-            "SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) wins FROM trades"
+            "SUM(CASE WHEN pnl > 0 AND NOT COALESCE(is_be,FALSE) THEN 1 ELSE 0 END) wins, "
+            "SUM(CASE WHEN pnl <= 0 AND NOT COALESCE(is_be,FALSE) THEN 1 ELSE 0 END) losses, "
+            "SUM(CASE WHEN COALESCE(is_be,FALSE) THEN 1 ELSE 0 END) be_count FROM trades"
         )
         open_count = await conn.fetchval("SELECT COUNT(*) FROM positions")
-    total = row["total"] or 0
-    wins  = row["wins"]  or 0
+    total    = row["total"]    or 0
+    wins     = row["wins"]     or 0
+    losses   = row["losses"]   or 0
+    be_count = row["be_count"] or 0
     return {
         "total_trades":   total,
         "wins":           wins,
-        "losses":         total - wins,
-        "win_rate":       round(wins / total * 100, 2) if total else 0,
+        "losses":         losses,
+        "be":             be_count,
+        "win_rate":       round(wins / (wins + losses) * 100, 2) if (wins + losses) else 0,
         "total_pnl":      round(row["total_pnl"] or 0.0, 2),
         "open_positions": open_count,
         "balance":        round(await get_paper_balance(), 2),

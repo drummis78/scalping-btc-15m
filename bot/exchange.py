@@ -223,16 +223,17 @@ class BinanceExchange:
     async def _paper_close(self, pos: dict, price: float, close_reason: str) -> dict:
         if price <= 0:
             price = pos["entry_price"]
+        is_be = bool(pos.get("be_set")) and close_reason == "sl_hit"
         pnl = await remove_position(EXCHANGE_NAME, pos["symbol"], pos["side"], price, close_reason,
-                                    strategy=pos.get("strategy"))
+                                    strategy=pos.get("strategy"), is_be=is_be)
         commission = price * pos["qty"] * COMMISSIONS
         margin     = pos["entry_price"] * pos["qty"] / pos["leverage"]
         balance    = await get_paper_balance()
         await save_paper_balance(balance + margin + pnl - commission)
-        await add_daily_pnl(pnl, pnl > 0)
-        logger.info(f"[PAPER] CLOSE {pos['side'].upper()} {pos['symbol']} @ {price:.4f} PnL={pnl:+.2f} ({close_reason})")
+        await add_daily_pnl(pnl, pnl > 0 and not is_be, is_be=is_be)
+        logger.info(f"[PAPER] CLOSE {pos['side'].upper()} {pos['symbol']} @ {price:.4f} PnL={pnl:+.2f} ({close_reason}) be={is_be}")
         return {"status": "success", "symbol": pos["symbol"], "side": pos["side"],
-                "price": price, "pnl": pnl, "close_reason": close_reason}
+                "price": price, "pnl": pnl, "close_reason": close_reason, "is_be": is_be}
 
     async def _real_close(self, pos: dict, price: float, close_reason: str) -> dict:
         ex = _build_exchange()
@@ -258,11 +259,12 @@ class BinanceExchange:
                         "newClientOrderId": client_id}
             )
             fill_price = float(order.get("average") or order.get("price") or price)
+            is_be = bool(pos.get("be_set")) and close_reason == "sl_hit"
             pnl = await remove_position(EXCHANGE_NAME, symbol, side, fill_price, close_reason,
-                                        strategy=pos.get("strategy"))
-            await add_daily_pnl(pnl, pnl > 0)
+                                        strategy=pos.get("strategy"), is_be=is_be)
+            await add_daily_pnl(pnl, pnl > 0 and not is_be, is_be=is_be)
             return {"status": "success", "symbol": symbol, "side": side,
-                    "price": fill_price, "pnl": pnl, "close_reason": close_reason}
+                    "price": fill_price, "pnl": pnl, "close_reason": close_reason, "is_be": is_be}
         except Exception as e:
             logger.error(f"[CLOSE] {symbol} {side}: {e}")
             return {"status": "error", "message": str(e), "symbol": symbol, "side": side}

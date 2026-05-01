@@ -137,6 +137,15 @@ async def init_db():
         await conn.execute(
             "ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS chop_val REAL DEFAULT NULL"
         )
+        await conn.execute(
+            "ALTER TABLE trades ADD COLUMN IF NOT EXISTS is_be BOOLEAN DEFAULT FALSE"
+        )
+        await conn.execute(
+            "ALTER TABLE daily_stats ADD COLUMN IF NOT EXISTS be_count INTEGER DEFAULT 0"
+        )
+        await conn.execute(
+            "ALTER TABLE daily_stats ADD COLUMN IF NOT EXISTS loss_count INTEGER DEFAULT 0"
+        )
         # Parchear cooldown signals existentes que tienen result_json vacío
         await conn.execute("""
             UPDATE signal_log
@@ -211,7 +220,7 @@ async def save_position(exchange: str, symbol: str, side: str, entry_price: floa
 
 async def remove_position(exchange: str, symbol: str, side: str,
                           exit_price: float, close_reason: str = "",
-                          strategy: str = None) -> float:
+                          strategy: str = None, is_be: bool = False) -> float:
     pos = await get_position(exchange, symbol, side, strategy)
     if not pos:
         return 0.0
@@ -223,11 +232,11 @@ async def remove_position(exchange: str, symbol: str, side: str,
             await conn.execute("""
                 INSERT INTO trades
                 (exchange, symbol, side, entry_price, exit_price, qty, leverage, pnl,
-                 close_reason, open_time, close_time, strategy)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                 close_reason, open_time, close_time, strategy, is_be)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
             """, exchange, symbol, side, pos["entry_price"], exit_price, pos["qty"],
                  pos["leverage"], pnl_usd, close_reason, pos["open_time"],
-                 datetime.now(timezone.utc).isoformat(), strat)
+                 datetime.now(timezone.utc).isoformat(), strat, is_be)
             await conn.execute(
                 "DELETE FROM positions WHERE exchange=$1 AND symbol=$2 AND side=$3 AND strategy=$4",
                 exchange, symbol, side, strat
@@ -289,7 +298,7 @@ async def ensure_daily_stats():
         """, today, balance)
 
 
-async def add_daily_pnl(pnl: float, won: bool):
+async def add_daily_pnl(pnl: float, won: bool, is_be: bool = False):
     today = _today_utc()
     await ensure_daily_stats()
     async with get_pool().acquire() as conn:
@@ -297,9 +306,15 @@ async def add_daily_pnl(pnl: float, won: bool):
             UPDATE daily_stats
             SET realized_pnl = realized_pnl + $1,
                 trade_count  = trade_count + 1,
-                win_count    = win_count + $2
-            WHERE date = $3
-        """, pnl, 1 if won else 0, today)
+                win_count    = win_count    + $2,
+                be_count     = be_count     + $3,
+                loss_count   = loss_count   + $4
+            WHERE date = $5
+        """, pnl,
+             1 if (won and not is_be) else 0,
+             1 if is_be else 0,
+             1 if (not won and not is_be) else 0,
+             today)
 
 
 async def get_today_stats() -> dict:
@@ -367,18 +382,24 @@ async def get_consecutive_losses(strategy: str | None = None) -> tuple[int, str 
     async with get_pool().acquire() as conn:
         if strategy:
             rows = await conn.fetch(
-                "SELECT pnl, close_time FROM trades WHERE strategy=$1 ORDER BY id DESC LIMIT 20",
+                "SELECT pnl, close_time, is_be FROM trades WHERE strategy=$1 ORDER BY id DESC LIMIT 20",
                 strategy,
             )
         else:
             rows = await conn.fetch(
-                "SELECT pnl, close_time FROM trades ORDER BY id DESC LIMIT 20"
+                "SELECT pnl, close_time, is_be FROM trades ORDER BY id DESC LIMIT 20"
             )
     if not rows:
         return 0, None
+    # BE trades son neutros: no son win ni loss, rompen cualquier racha
     streak = 0
-    sign = 1 if (rows[0]["pnl"] or 0) > 0 else -1
+    first = rows[0]
+    if first["is_be"]:
+        return 0, str(first["close_time"])
+    sign = 1 if (first["pnl"] or 0) > 0 else -1
     for r in rows:
+        if r["is_be"]:
+            break
         pnl = r["pnl"] or 0
         if (pnl > 0 and sign == 1) or (pnl <= 0 and sign == -1):
             streak += sign
