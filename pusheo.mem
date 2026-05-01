@@ -31,3 +31,11 @@
 
 [~09:30 ART] | dashboard-general | 0ffd1f4 | feat: agregar build number al header para verificar deploy vs cache
 [~09:30 ART] | scalping-btc-15m | 675b36a | chore: agregar pusheo.mem + actualizar backlog.mem con orden de ejecucion
+[~09:35 ART] | scalping-btc-15m | 0fa45f3 | chore: actualizar pusheo.mem con commits de sesion noche
+[~09:40 ART] | scalping-btc-15m | 85715b3 | chore: backlog — revisar build number dashboard-general
+[~09:45 ART] | scalping-btc-15m | 18c2273 | chore: backlog — clasificar BE como categoria separada en metricas
+[~09:50 ART] | scalping-btc-15m | c862f6f | chore: backlog — backup señales fuera de la DB
+
+## 2026-05-01
+
+[~00:00 ART] | scalping-btc-15m | 48bd26e | feat: build number + notas en card de balance del dashboard
