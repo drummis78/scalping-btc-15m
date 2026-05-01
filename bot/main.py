@@ -41,8 +41,9 @@ logging.basicConfig(
 logger = logging.getLogger("scalping_bot")
 
 # Build info — actualizar en cada deploy
-BUILD       = "2026-05-01 #001"
-BUILD_NOTES = "Revert a estado 2026-04-29 12hs · backlog.mem + pusheo.mem · sin shadow monitors"
+BUILD        = "2026-05-01 #001"
+BUILD_COMMIT = "729a2c2"
+BUILD_NOTES  = "Revert a estado 2026-04-29 12hs · backlog.mem + pusheo.mem · sin shadow monitors"
 
 # Símbolos cargados una vez al startup
 _symbols: list[dict] = []
@@ -998,7 +999,7 @@ async def dashboard():
             <div class="val">${bal:,.2f}</div>
             <button onclick="resetBalance()" style="margin-top:4px;padding:3px 8px;border-radius:6px;border:1px solid #00bcd444;background:#00bcd40d;color:#00bcd4;cursor:pointer;font-size:10px">↺ ${settings.PAPER_BALANCE:.0f}</button>
             <div style="margin-top:6px;font-size:9px;color:#333;line-height:1.5">
-                build {BUILD}<br>
+                build {BUILD} · <span style="font-family:monospace">{BUILD_COMMIT}</span><br>
                 <span style="color:#2a2a2a">{BUILD_NOTES}</span>
             </div>
         </div>
