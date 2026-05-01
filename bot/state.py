@@ -361,13 +361,19 @@ async def log_signal(ts: str, symbol: str, side: str, price: float,
              chop_val)
 
 
-async def get_consecutive_losses() -> tuple[int, str | None]:
-    """Retorna (racha_actual, close_time_del_ultimo_trade).
+async def get_consecutive_losses(strategy: str | None = None) -> tuple[int, str | None]:
+    """Retorna (racha_actual, close_time_del_ultimo_trade) filtrado por estrategia.
     Racha positiva = ganancias consecutivas, negativa = pérdidas consecutivas."""
     async with get_pool().acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT pnl, close_time FROM trades ORDER BY id DESC LIMIT 20"
-        )
+        if strategy:
+            rows = await conn.fetch(
+                "SELECT pnl, close_time FROM trades WHERE strategy=$1 ORDER BY id DESC LIMIT 20",
+                strategy,
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT pnl, close_time FROM trades ORDER BY id DESC LIMIT 20"
+            )
     if not rows:
         return 0, None
     streak = 0

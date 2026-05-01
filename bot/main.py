@@ -133,9 +133,9 @@ async def _process_signal(sig: dict):
                          True, "max_positions", 0.0, "skipped_max_positions", "", strategy)
         return
 
-    # Cooldown tras N pérdidas consecutivas
+    # Cooldown tras N pérdidas consecutivas — independiente por estrategia
     if settings.COOLDOWN_LOSSES > 0:
-        streak, last_close = await get_consecutive_losses()
+        streak, last_close = await get_consecutive_losses(strategy=strategy)
         if streak <= -settings.COOLDOWN_LOSSES and last_close:
             try:
                 last_dt  = datetime.fromisoformat(last_close.replace("Z", "+00:00"))
@@ -594,6 +594,22 @@ async def dashboard():
             SELECT fund_reason, ts FROM signal_log
             WHERE verdict='blocked_cooldown' ORDER BY id DESC LIMIT 1
         """)
+        # Stats por estrategia para el panel de cooldown
+        cooldown_by_strategy = {}
+        for strat in ("donchian", "tcp"):
+            cooldown_by_strategy[strat] = {
+                "total": await conn.fetchval(
+                    "SELECT COUNT(*) FROM signal_log WHERE verdict='blocked_cooldown' AND strategy=$1", strat
+                ) or 0,
+                "24h": await conn.fetchval("""
+                    SELECT COUNT(*) FROM signal_log
+                    WHERE verdict='blocked_cooldown' AND strategy=$1
+                    AND ts::timestamptz >= NOW() - INTERVAL '24 hours'
+                """, strat) or 0,
+                "last": await conn.fetchrow(
+                    "SELECT fund_reason, ts FROM signal_log WHERE verdict='blocked_cooldown' AND strategy=$1 ORDER BY id DESC LIMIT 1", strat
+                ),
+            }
         fund_status_row = await conn.fetchrow("""
             SELECT title fg_label,
                    (magnitude::numeric) fg_value,
@@ -768,85 +784,82 @@ async def dashboard():
         return "".join(rows)
 
     def _build_cooldown_panel():
-        streak, last_close = 0, None
-        # Calcular streak y cooldown restante en base a datos ya disponibles
-        # (usamos get_consecutive_losses que ya fue llamada, pero no está en scope aquí —
-        #  en su lugar calculamos desde los trades ya cargados)
-        if trades:
-            sign = 1 if (trades[0].get("pnl") or 0) > 0 else -1
-            for tr in trades:
+        def _streak_for(strat_name: str):
+            strat_trades = [t for t in trades if (t.get("strategy") or "") == strat_name]
+            if not strat_trades:
+                return 0, None
+            streak = 0
+            sign = 1 if (strat_trades[0].get("pnl") or 0) > 0 else -1
+            for tr in strat_trades:
                 pnl = tr.get("pnl") or 0
                 if (pnl > 0 and sign == 1) or (pnl <= 0 and sign == -1):
                     streak += sign
                 else:
                     break
-            last_close = str(trades[0].get("close_time", ""))[:19] if trades else None
+            return streak, str(strat_trades[0].get("close_time", ""))[:19]
 
-        cooldown_active = False
-        cooldown_remaining_min = 0
-        cooldown_until_str = ""
-        if streak <= -settings.COOLDOWN_LOSSES and last_close:
-            try:
-                last_dt = datetime.fromisoformat(last_close.replace("Z", "+00:00"))
-                cooldown_until = last_dt + timedelta(minutes=settings.COOLDOWN_MINUTES)
-                now_utc = datetime.now(timezone.utc)
-                if now_utc < cooldown_until:
-                    cooldown_active = True
-                    cooldown_remaining_min = int((cooldown_until - now_utc).total_seconds() / 60)
-                    cooldown_until_str = cooldown_until.strftime("%H:%M UTC")
-            except Exception:
-                pass
+        def _cd_state(streak, last_close):
+            if streak <= -settings.COOLDOWN_LOSSES and last_close:
+                try:
+                    last_dt = datetime.fromisoformat(last_close.replace("Z", "+00:00"))
+                    cooldown_until = last_dt + timedelta(minutes=settings.COOLDOWN_MINUTES)
+                    now_utc = datetime.now(timezone.utc)
+                    if now_utc < cooldown_until:
+                        remaining = int((cooldown_until - now_utc).total_seconds() / 60)
+                        return True, remaining, cooldown_until.strftime("%H:%M UTC")
+                except Exception:
+                    pass
+            return False, 0, ""
 
-        streak_color = "#00e676" if streak > 0 else ("#ff5252" if streak < 0 else "#aaa")
-        streak_icon  = "🟢" * min(abs(streak), 5) if streak > 0 else "🔴" * min(abs(streak), 5)
-        streak_label = f"+{streak} ganancias" if streak > 0 else (f"{streak} pérdidas" if streak < 0 else "0 (neutro)")
+        def _strat_block(strat_name: str, label: str, color: str):
+            streak, last_close = _streak_for(strat_name)
+            active, remaining, until_str = _cd_state(streak, last_close)
+            info = cooldown_by_strategy.get(strat_name, {})
+            blk_total = info.get("total", 0)
+            blk_24h   = info.get("24h", 0)
+            last_row  = info.get("last")
 
-        if cooldown_active:
-            cd_html = (f'<div style="margin-top:8px;padding:8px 12px;background:#ff52521a;'
-                       f'border:1px solid #ff525244;border-radius:6px;font-size:12px">'
-                       f'⛔ <b style="color:#ff5252">COOLDOWN ACTIVO</b> — '
-                       f'<b>{cooldown_remaining_min} min restantes</b> (hasta {cooldown_until_str})'
-                       f'</div>')
-        else:
-            cd_html = (f'<div style="margin-top:8px;font-size:11px;color:#555">'
-                       f'Sin cooldown activo &nbsp;|&nbsp; '
-                       f'Se activa con {settings.COOLDOWN_LOSSES} pérdidas consecutivas, '
-                       f'dura {settings.COOLDOWN_MINUTES} min'
-                       f'</div>')
+            streak_color = "#00e676" if streak > 0 else ("#ff5252" if streak < 0 else "#aaa")
+            streak_icon  = "🟢" * min(abs(streak), 5) if streak > 0 else "🔴" * min(abs(streak), 5)
+            streak_label = f"+{streak} ganancias" if streak > 0 else (f"{streak} pérdidas" if streak < 0 else "0 (neutro)")
 
-        # Último evento de cooldown
-        last_cd_html = ""
-        if cooldown_last:
-            reason = str(cooldown_last["fund_reason"] or "")
-            ts_cd  = str(cooldown_last["ts"] or "")[:16]
-            last_cd_html = (f'<div style="margin-top:6px;font-size:10px;color:#555">'
-                            f'Último bloqueo: <b style="color:#ffa500">{reason}</b> '
-                            f'— {ts_cd}'
-                            f'</div>')
+            if active:
+                cd_html = (f'<div style="margin-top:6px;padding:6px 10px;background:#ff52521a;'
+                           f'border:1px solid #ff525244;border-radius:6px;font-size:11px">'
+                           f'⛔ <b style="color:#ff5252">COOLDOWN ACTIVO</b> — '
+                           f'<b>{remaining} min restantes</b> (hasta {until_str})</div>')
+            else:
+                cd_html = (f'<div style="margin-top:6px;font-size:10px;color:#555">'
+                           f'Sin cooldown activo</div>')
+
+            last_cd_html = ""
+            if last_row:
+                reason = str(last_row["fund_reason"] or "")
+                ts_cd  = str(last_row["ts"] or "")[:16]
+                last_cd_html = (f'<div style="font-size:10px;color:#444;margin-top:4px">'
+                                f'Último: <b style="color:#ffa500">{reason}</b> — {ts_cd}</div>')
+
+            return f"""
+            <div style="flex:1;min-width:220px;background:#0d0d0d;border:1px solid #1e1e1e;border-radius:8px;padding:12px 14px">
+                <div style="font-size:10px;font-weight:700;color:{color};text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">{label}</div>
+                <div style="font-size:18px;font-weight:bold;color:{streak_color}">{streak_icon} {streak_label}</div>
+                <div style="font-size:10px;color:#444;margin-top:4px">
+                    Bloqueados: <b style="color:#ffa500">{blk_total}</b> total &nbsp;|&nbsp; <b style="color:#ffa500">{blk_24h}</b> 24h
+                </div>
+                {cd_html}
+                {last_cd_html}
+            </div>"""
 
         return f"""
         <div style="background:#141414;border:1px solid #222;border-radius:10px;padding:14px 18px;margin-bottom:16px">
-            <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start">
-                <div>
-                    <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Racha actual</div>
-                    <div style="font-size:20px;font-weight:bold;color:{streak_color}">{streak_icon} {streak_label}</div>
-                </div>
-                <div>
-                    <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Señales bloqueadas por cooldown</div>
-                    <div style="font-size:20px;font-weight:bold;color:#ffa500">{cooldown_blocks_total}</div>
-                    <div style="font-size:10px;color:#444">Total &nbsp;|&nbsp; <b style="color:#ffa500">{cooldown_blocks_24h}</b> últimas 24h</div>
-                </div>
-                <div style="flex:1">
-                    <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Configuración</div>
-                    <div style="font-size:12px;color:#888;line-height:1.8">
-                        Activación: <b style="color:#aaa">{settings.COOLDOWN_LOSSES} pérdidas consecutivas</b><br>
-                        Duración: <b style="color:#aaa">{settings.COOLDOWN_MINUTES} minutos</b>
-                        {"&nbsp;&nbsp;⏱ <b style='color:#ff5252;font-size:13px'>Restan " + str(cooldown_remaining_min) + " min</b> <span style='color:#555;font-size:10px'>(hasta " + cooldown_until_str + ")</span>" if cooldown_active else "&nbsp;&nbsp;<span style='color:#555;font-size:10px'>— sin cooldown activo</span>"}
-                    </div>
-                </div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+                <span style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px">⏸ Cooldown — Racha de pérdidas</span>
+                <span style="font-size:10px;color:#444">Activación: {settings.COOLDOWN_LOSSES} pérdidas · Duración: {settings.COOLDOWN_MINUTES} min · Total bloqueados: <b style="color:#ffa500">{cooldown_blocks_total}</b> ({cooldown_blocks_24h} 24h)</span>
             </div>
-            {cd_html}
-            {last_cd_html}
+            <div style="display:flex;gap:12px;flex-wrap:wrap">
+                {_strat_block("donchian", "15m Donchian", "#00bcd4")}
+                {_strat_block("tcp", "TCP 15m", "#ff9800")}
+            </div>
         </div>"""
 
     def rows_chop_analysis():
